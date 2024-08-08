@@ -30,14 +30,24 @@ fn decode_address(content_iter: &mut Iter<u8>, _mod: u8, rm: u8) -> String {
     } else {
         Some(W_TO_REG_NAME[usize::from(16 + rm)].to_string())
     };
+
     match registers_sum {
         None => format!("[{}]", displacement_number),
+        Some(registers_sum) if displacement_number == 0 => {
+            format!("[{}]", registers_sum)
+        }
+        Some(registers_sum) if displacement_bytes == 1 && displacement_number >= 128 => {
+            format!(
+                "[{}-{}]",
+                registers_sum,
+                (1 + !displacement_number) & 0b11111111
+            )
+        }
+        Some(registers_sum) if displacement_bytes == 2 && displacement_number >= 1 << 15 => {
+            format!("[{}-{}]", registers_sum, 1 + !displacement_number)
+        }
         Some(registers_sum) => {
-            if displacement_number == 0 {
-                format!("[{}]", registers_sum)
-            } else {
-                format!("[{}+{}]", registers_sum, displacement_number)
-            }
+            format!("[{}+{}]", registers_sum, displacement_number)
         }
     }
 }
