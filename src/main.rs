@@ -123,6 +123,23 @@ fn mov_immediate_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) ->
     format!("mov {}, {}", reg_name, data)
 }
 
+fn mov_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
+    assert!(first >> 2 == 0b101000);
+    let w = first & 0b1;
+    let to_acc = first >> 1 & 0b1 == 0;
+
+    let mut displacement_number: u16 = u16::from(*(second));
+    if w == 1 {
+        displacement_number |= u16::from(*(content_iter.next().unwrap())) << 8;
+    }
+
+    if to_acc {
+        format!("mov ax, [{}]", displacement_number)
+    } else {
+        format!("mov [{}], ax", displacement_number)
+    }
+}
+
 fn main() {
     let Some(path) = std::env::args().skip(1).next() else {
         std::println!("Please provide assembly file path");
@@ -149,6 +166,8 @@ fn main() {
             "{}",
             if first >> 1 == 0b1100011 {
                 mov_immediate_to_rm(&mut content_iter, first, second)
+            } else if first >> 2 == 0b101000 {
+                mov_acc(&mut content_iter, first, second)
             } else if first >> 2 == 0b100010 {
                 mov_reg_to_reg(&mut content_iter, first, second)
             } else if first >> 4 == 0b1011 {
