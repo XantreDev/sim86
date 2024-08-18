@@ -52,8 +52,7 @@ fn decode_address(content_iter: &mut Iter<u8>, _mod: u8, rm: u8) -> String {
     }
 }
 
-fn mov_reg_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
-    assert_eq!(first >> 2, 0b100010);
+fn rm_tf_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
     let w = first & 0b1;
     let d = (first >> 1) & 0b1;
 
@@ -62,14 +61,14 @@ fn mov_reg_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Strin
     let rm = second & 0b111;
 
     match _mod {
-        0b00 | 0b01 | 0b10 => {
+        0b00..=0b10 => {
             let address = &decode_address(content_iter, _mod, rm);
 
             let reg_name = decode_reg(reg, w);
             let left_reg_name = if d == 1 { reg_name } else { address };
             let right_reg_name = if d == 1 { address } else { reg_name };
 
-            format!("mov {}, {}", left_reg_name, right_reg_name)
+            format!("{}, {}", left_reg_name, right_reg_name)
         }
         0b11 => {
             let reg_name = decode_reg(reg, w);
@@ -78,7 +77,7 @@ fn mov_reg_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Strin
             let left_reg_name = if d == 1 { reg_name } else { rm_reg_name };
             let right_reg_name = if d == 1 { rm_reg_name } else { reg_name };
 
-            format!("mov {}, {}", left_reg_name, right_reg_name)
+            format!("{}, {}", left_reg_name, right_reg_name)
         }
         _ => {
             panic!("Unknown mod");
@@ -140,6 +139,17 @@ fn mov_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
     }
 }
 
+fn instruction_of_first_byte(first: &u8) -> &'static str {
+    match first {
+        0b1100_0110..=0b1100_0111
+        | 0b1010_0000..=0b1010_0011
+        | 0b1000_1000..=0b1000_1011
+        | 0b1011_0000..=0b1011_1111 => "mov",
+        0b0000_0000..=0b0000_0011 | 0b1000_000..=0b1000_0011 | 0b0000_0100..=0b0000_0101 => "add",
+        _ => panic!("unknown instruction"),
+    }
+}
+
 fn process_binary<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
     writeln!(out, "bits 16\n").unwrap();
     loop {
@@ -152,10 +162,13 @@ fn process_binary<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
             out,
             "{}",
             match first {
-                0b11000110..=0b11000111 => mov_immediate_to_rm(&mut content_iter, first, second),
-                0b10100000..=0b10100011 => mov_acc(&mut content_iter, first, second),
-                0b10001000..=0b10001011 => mov_reg_to_reg(&mut content_iter, first, second),
-                0b10110000..=0b10111111 => mov_immediate_to_reg(&mut content_iter, first, second),
+                0b1000_1000..=0b1000_1011 =>
+                    format!("mov {}", rm_tf_reg(&mut content_iter, first, second)),
+                0b0000_0000..=0b0000_0011 =>
+                    format!("add {}", rm_tf_reg(&mut content_iter, first, second)),
+                0b1100_0110..=0b1100_0111 => mov_immediate_to_rm(&mut content_iter, first, second),
+                0b1010_0000..=0b1010_0011 => mov_acc(&mut content_iter, first, second),
+                0b1011_0000..=0b1011_1111 => mov_immediate_to_reg(&mut content_iter, first, second),
                 _ => panic!("unknown operand"),
             }
         )
