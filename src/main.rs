@@ -1,4 +1,4 @@
-use std::slice::Iter;
+use std::{io::Write, slice::Iter};
 
 const W_TO_REG_NAME: &'static [&'static str; 24] = &[
     "al", "cl", "dl", "bl", "ah", "ch", "dh", "bh", // w = 0
@@ -140,41 +140,91 @@ fn mov_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
     }
 }
 
-fn main() {
-    let Some(path) = std::env::args().skip(1).next() else {
-        std::println!("Please provide assembly file path");
-        return;
-    };
-    let Ok(content) = std::fs::read(path) else {
-        std::println!("Failed to read file");
-        return;
-    };
-
-    // if content.len() % 2 == 1 {
-    //     println!("Content size must be even");
-    //     return;
-    // }
-    let mut content_iter = content.iter();
-    println!("bits 16\n");
+fn process_binary<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
+    writeln!(out, "bits 16\n").unwrap();
     loop {
         let Some(first) = content_iter.next() else {
             return;
         };
         let second = content_iter.next().unwrap();
 
-        println!(
+        writeln!(
+            out,
             "{}",
-            if first >> 1 == 0b1100011 {
-                mov_immediate_to_rm(&mut content_iter, first, second)
-            } else if first >> 2 == 0b101000 {
-                mov_acc(&mut content_iter, first, second)
-            } else if first >> 2 == 0b100010 {
-                mov_reg_to_reg(&mut content_iter, first, second)
-            } else if first >> 4 == 0b1011 {
-                mov_immediate_to_reg(&mut content_iter, first, second)
-            } else {
-                panic!("unknown operand")
+            match first {
+                0b11000110..=0b11000111 => mov_immediate_to_rm(&mut content_iter, first, second),
+                0b10100000..=0b10100011 => mov_acc(&mut content_iter, first, second),
+                0b10001000..=0b10001011 => mov_reg_to_reg(&mut content_iter, first, second),
+                0b10110000..=0b10111111 => mov_immediate_to_reg(&mut content_iter, first, second),
+                _ => panic!("unknown operand"),
             }
         )
+        .unwrap()
+    }
+}
+
+fn read_file<T: Into<String>>(file_path: T) -> Vec<u8> {
+    let Ok(content) = std::fs::read(file_path.into()) else {
+        panic!("Failed to read file");
+    };
+
+    content
+}
+fn main() {
+    let Some(path) = std::env::args().skip(1).next() else {
+        std::println!("Please provide assembly file path");
+        return;
+    };
+
+    let content = read_file(path);
+    let content_iter = content.iter();
+    process_binary(content_iter, &mut std::io::stdout().lock());
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::create_dir, fs::File, io::Write, path::Path, process::Command};
+
+    use crate::{process_binary, read_file};
+
+    #[test]
+    fn test_files() {
+        let files = [
+            "./input/listing_0037_single_register_mov",
+            "./input/listing_0038_many_register_mov",
+            "./input/listing_0039_more_movs",
+            "./input/listing_0040_challenge_movs",
+        ];
+
+        for file_path in files {
+            if !Path::new(file_path).exists() {
+                let asm_path = format!("{}.asm", file_path);
+                assert!(Path::new(&asm_path).exists());
+
+                Command::new("nasm").args([asm_path]).output().unwrap();
+                assert!(Path::new(&file_path).exists());
+            }
+            let file = read_file(file_path);
+            let mut res: Vec<u8> = Vec::new();
+
+            process_binary(file.iter(), &mut res);
+
+            if !Path::new("./.test").exists() {
+                create_dir("./.test").unwrap();
+            }
+
+            File::create("./.test/test.asm")
+                .unwrap()
+                .write_all(res.as_slice())
+                .unwrap();
+
+            Command::new("nasm")
+                .args(["./.test/test.asm"])
+                .output()
+                .unwrap();
+
+            let nasm_file = read_file("./.test/test".to_string());
+            assert!(nasm_file == file);
+        }
     }
 }
