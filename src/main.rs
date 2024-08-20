@@ -25,34 +25,32 @@ fn decode_address(content_iter: &mut Iter<u8>, _mod: u8, rm: u8) -> String {
         _ => {}
     }
 
-    let registers_sum = if is_direct_address {
-        None
-    } else {
-        Some(W_TO_REG_NAME[usize::from(16 + rm)].to_string())
-    };
+    if is_direct_address {
+        return format!("[{}]", displacement_number);
+    }
+    let registers_sum = W_TO_REG_NAME[usize::from(16 + rm)].to_string();
 
-    match registers_sum {
-        None => format!("[{}]", displacement_number),
-        Some(registers_sum) if displacement_number == 0 => {
+    match (displacement_number, displacement_bytes) {
+        (0, _) => {
             format!("[{}]", registers_sum)
         }
-        Some(registers_sum) if displacement_bytes == 1 && displacement_number >= 128 => {
+        (displacement_number, 1) if displacement_number >= 1 << 7 => {
             format!(
                 "[{}-{}]",
                 registers_sum,
                 (1 + !displacement_number) & 0b11111111
             )
         }
-        Some(registers_sum) if displacement_bytes == 2 && displacement_number >= 1 << 15 => {
+        (displacement_number, 2) if displacement_number >= 1 << 15 => {
             format!("[{}-{}]", registers_sum, 1 + !displacement_number)
         }
-        Some(registers_sum) => {
+        (displacement_number, _) => {
             format!("[{}+{}]", registers_sum, displacement_number)
         }
     }
 }
 
-fn rm_tf_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
+fn rm_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
     let w = first & 0b1;
     let d = (first >> 1) & 0b1;
 
@@ -60,49 +58,74 @@ fn rm_tf_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
     let reg = (second >> 3) & 0b111;
     let rm = second & 0b111;
 
-    match _mod {
-        0b00..=0b10 => {
-            let address = &decode_address(content_iter, _mod, rm);
-
-            let reg_name = decode_reg(reg, w);
-            let left_reg_name = if d == 1 { reg_name } else { address };
-            let right_reg_name = if d == 1 { address } else { reg_name };
-
-            format!("{}, {}", left_reg_name, right_reg_name)
-        }
-        0b11 => {
-            let reg_name = decode_reg(reg, w);
-            let rm_reg_name = decode_reg(rm, w);
-
-            let left_reg_name = if d == 1 { reg_name } else { rm_reg_name };
-            let right_reg_name = if d == 1 { rm_reg_name } else { reg_name };
-
-            format!("{}, {}", left_reg_name, right_reg_name)
-        }
+    let address_or_reg = match _mod {
+        0b00..=0b10 => &decode_address(content_iter, _mod, rm),
+        0b11 => decode_reg(rm, w),
         _ => {
-            panic!("Unknown mod");
+            panic!("invalid mod processing");
         }
-    }
+    };
+
+    let reg_name = decode_reg(reg, w);
+    let (left, right) = if d == 1 {
+        (reg_name, address_or_reg)
+    } else {
+        (address_or_reg, reg_name)
+    };
+
+    format!("{}, {}", left, right)
 }
 
-fn mov_immediate_to_rm(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
-    let w = first & 0b1;
+struct Im2Rm {
+    address: String,
+    s: bool,
+    w: bool,
+    immediate: u16,
+}
 
-    assert!(second & 0b00111000 == 0);
-    let _mod = second >> 6 & 0b11;
-    let rm = second & 0b111;
+impl Im2Rm {
+    fn new(content_iter: &mut Iter<u8>, first: &u8, second: &u8, allow_s: bool) -> Self {
+        let s = first >> 1 & 0b1;
+        let w = first & 0b1;
 
-    let address = decode_address(content_iter, _mod, rm);
+        assert!(second & 0b00111000 == 0);
+        let _mod = second >> 6 & 0b11;
+        let rm = second & 0b111;
 
-    let mut immediate: u16 = 0;
-    immediate |= u16::from(*content_iter.next().unwrap());
-    if w == 0b1 {
-        immediate |= u16::from(*content_iter.next().unwrap()) << 8;
+        let address_or_reg = match _mod {
+            0b00..=0b10 => &decode_address(content_iter, _mod, rm),
+            0b11 => decode_reg(rm, w),
+            _ => {
+                panic!("invalid mod processing");
+            }
+        };
+
+        let mut immediate: u16 = 0;
+        immediate |= u16::from(*content_iter.next().unwrap());
+        if w == 0b1 && (!allow_s || s == 0b0) {
+            immediate |= u16::from(*content_iter.next().unwrap()) << 8;
+        }
+
+        Im2Rm {
+            s: s == 0b1,
+            w: w == 0b1,
+            immediate,
+            address: address_or_reg.into(),
+        }
     }
 
-    let word_type = if w == 0b1 { "word" } else { "byte" };
-
-    format!("mov {}, {} {}", address, word_type, immediate)
+    fn format_as_mov(&self) -> String {
+        let word_type = if self.w { "word" } else { "byte" };
+        format!("{}, {} {}", self.address, word_type, self.immediate)
+    }
+    fn format_as_add(&self) -> String {
+        if self.address.starts_with('[') {
+            let word_type = if self.s { "word" } else { "byte" };
+            format!("{} {}, {}", word_type, self.address, self.immediate)
+        } else {
+            format!("{}, {}", self.address, self.immediate)
+        }
+    }
 }
 
 fn mov_immediate_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
@@ -163,10 +186,17 @@ fn process_binary<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
             "{}",
             match first {
                 0b1000_1000..=0b1000_1011 =>
-                    format!("mov {}", rm_tf_reg(&mut content_iter, first, second)),
+                    format!("mov {}", rm_to_reg(&mut content_iter, first, second)),
                 0b0000_0000..=0b0000_0011 =>
-                    format!("add {}", rm_tf_reg(&mut content_iter, first, second)),
-                0b1100_0110..=0b1100_0111 => mov_immediate_to_rm(&mut content_iter, first, second),
+                    format!("add {}", rm_to_reg(&mut content_iter, first, second)),
+                0b1100_0110..=0b1100_0111 => format!(
+                    "mov {}",
+                    Im2Rm::new(&mut content_iter, first, second, false).format_as_mov()
+                ),
+                0b1000_0000..=0b1000_0011 => format!(
+                    "add {}",
+                    Im2Rm::new(&mut content_iter, first, second, true).format_as_add()
+                ),
                 0b1010_0000..=0b1010_0011 => mov_acc(&mut content_iter, first, second),
                 0b1011_0000..=0b1011_1111 => mov_immediate_to_reg(&mut content_iter, first, second),
                 _ => panic!("unknown operand"),
@@ -207,6 +237,7 @@ mod tests {
             "./input/listing_0038_many_register_mov",
             "./input/listing_0039_more_movs",
             "./input/listing_0040_challenge_movs",
+            // "./input/listing_0041_add_sub_cmp_jnz",
         ];
 
         for file_path in files {
@@ -219,6 +250,7 @@ mod tests {
             }
             let file = read_file(file_path);
             let mut res: Vec<u8> = Vec::new();
+            println!("checking '{}'", file_path);
 
             process_binary(file.iter(), &mut res);
 
