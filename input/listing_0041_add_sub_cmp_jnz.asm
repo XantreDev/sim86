@@ -33,13 +33,13 @@ add [bp + si + 4], bh
 add [bp + di + 6], di
 add byte [bx], 34
 add word [bp + si + 1000], 29
-;add ax, [bp]
-;add al, [bx + si]
-;add ax, bx
-;add al, ah
-;add ax, 1000
-;add al, -30
-;add al, 9
+add ax, [bp]
+add al, [bx + si]
+add ax, bx
+add al, ah
+add ax, 1000
+add al, -30
+add al, 9
 ;
 ;sub bx, [bx+si]
 ;sub bx, [bp]

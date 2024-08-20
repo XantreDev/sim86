@@ -148,7 +148,7 @@ fn mov_immediate_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) ->
 fn mov_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
     assert!(first >> 2 == 0b101000);
     let w = first & 0b1;
-    let to_acc = first >> 1 & 0b1 == 0;
+    let to_acc = (first >> 1 & 0b1) == 0;
 
     let mut displacement_number: u16 = u16::from(*(second));
     if w == 1 {
@@ -159,6 +159,21 @@ fn mov_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
         format!("mov ax, [{}]", displacement_number)
     } else {
         format!("mov [{}], ax", displacement_number)
+    }
+}
+
+fn im_to_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
+    let w = first & 0b1;
+
+    let mut displacement_number: u16 = u16::from(*(second));
+    if w == 1 {
+        displacement_number |= u16::from(*(content_iter.next().unwrap())) << 8;
+    }
+
+    if w == 0 {
+        format!("al, {}", displacement_number)
+    } else {
+        format!("ax, {}", displacement_number)
     }
 }
 
@@ -197,6 +212,8 @@ fn process_binary<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
                     "add {}",
                     Im2Rm::new(&mut content_iter, first, second, true).format_as_add()
                 ),
+                0b0000_0100..=0b0000_0101 =>
+                    format!("add {}", im_to_acc(&mut content_iter, first, second)),
                 0b1010_0000..=0b1010_0011 => mov_acc(&mut content_iter, first, second),
                 0b1011_0000..=0b1011_1111 => mov_immediate_to_reg(&mut content_iter, first, second),
                 _ => panic!("unknown operand"),
@@ -237,11 +254,13 @@ mod tests {
             "./input/listing_0038_many_register_mov",
             "./input/listing_0039_more_movs",
             "./input/listing_0040_challenge_movs",
-            // "./input/listing_0041_add_sub_cmp_jnz",
+            "./input/listing_0041_add_sub_cmp_jnz",
         ];
 
         for file_path in files {
-            if !Path::new(file_path).exists() {
+            if std::env::var("RECOMPILE").map_or(false, |it| it == "true")
+                || !Path::new(file_path).exists()
+            {
                 let asm_path = format!("{}.asm", file_path);
                 assert!(Path::new(&asm_path).exists());
 
