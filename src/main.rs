@@ -1,4 +1,4 @@
-use std::{io::Write, slice::Iter};
+use std::{fmt::format, io::Write, slice::Iter};
 
 const W_TO_REG_NAME: &'static [&'static str; 24] = &[
     "al", "cl", "dl", "bl", "ah", "ch", "dh", "bh", // w = 0
@@ -84,7 +84,8 @@ struct Im2Rm {
 }
 
 impl Im2Rm {
-    fn new(content_iter: &mut Iter<u8>, first: &u8, second: &u8, allow_s: bool) -> Self {
+    // mov have no s byte. it always 1 in that case
+    fn new(content_iter: &mut Iter<u8>, first: &u8, second: &u8, is_arthmetic: bool) -> Self {
         let s = first >> 1 & 0b1;
         let w = first & 0b1;
 
@@ -102,7 +103,8 @@ impl Im2Rm {
 
         let mut immediate: u16 = 0;
         immediate |= u16::from(*content_iter.next().unwrap());
-        if w == 0b1 && (!allow_s || s == 0b0) {
+
+        if w == 0b1 && (!is_arthmetic || s == 0b0) {
             immediate |= u16::from(*content_iter.next().unwrap()) << 8;
         }
 
@@ -118,7 +120,7 @@ impl Im2Rm {
         let word_type = if self.w { "word" } else { "byte" };
         format!("{}, {} {}", self.address, word_type, self.immediate)
     }
-    fn format_as_add(&self) -> String {
+    fn format_as_arithmetic(&self) -> String {
         if self.address.starts_with('[') {
             let word_type = if self.s { "word" } else { "byte" };
             format!("{} {}, {}", word_type, self.address, self.immediate)
@@ -177,14 +179,74 @@ fn im_to_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
     }
 }
 
-fn instruction_of_first_byte(first: &u8) -> &'static str {
-    match first {
-        0b1100_0110..=0b1100_0111
-        | 0b1010_0000..=0b1010_0011
-        | 0b1000_1000..=0b1000_1011
-        | 0b1011_0000..=0b1011_1111 => "mov",
-        0b0000_0000..=0b0000_0011 | 0b1000_000..=0b1000_0011 | 0b0000_0100..=0b0000_0101 => "add",
-        _ => panic!("unknown instruction"),
+// rm - stands for Register or Memory
+enum ArithmeticInstructionType {
+    Sub,
+    Add,
+    Cmp,
+}
+enum ArithmeticInstructionAction {
+    RmToEither,
+    ImToRm,
+    ImToAcc,
+}
+
+struct ArithmeticInstruction {
+    t: ArithmeticInstructionType,
+    action: ArithmeticInstructionAction,
+}
+
+impl ArithmeticInstruction {
+    fn from(first: &u8, second: &u8) -> Option<ArithmeticInstruction> {
+        let is_immediate_to_rm = first >> 2 == 0b10_0000;
+        let middle_bits_to_operation = |byte: &u8| match (byte >> 3) & 0b111 {
+            0b000 => Some(ArithmeticInstructionType::Add),
+            0b101 => Some(ArithmeticInstructionType::Sub),
+            0b111 => Some(ArithmeticInstructionType::Cmp),
+            _ => None,
+        };
+
+        if is_immediate_to_rm {
+            return middle_bits_to_operation(second).map(|it| ArithmeticInstruction {
+                t: it,
+                action: ArithmeticInstructionAction::ImToRm,
+            });
+        }
+
+        // exluding middle byte
+        match first & 0b11_000_111 {
+            0b00_000_000..=0b00_000_011 => {
+                middle_bits_to_operation(first).map(|it| ArithmeticInstruction {
+                    t: it,
+                    action: ArithmeticInstructionAction::RmToEither,
+                })
+            }
+            0b00_000_100..=0b00_000_101 => {
+                middle_bits_to_operation(first).map(|it| ArithmeticInstruction {
+                    t: it,
+                    action: ArithmeticInstructionAction::ImToAcc,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn parse_and_format(self, first: &u8, second: &u8, content_iter: &mut Iter<u8>) -> String {
+        let operation = match &self.t {
+            ArithmeticInstructionType::Add => "add",
+            ArithmeticInstructionType::Cmp => "cmp",
+            ArithmeticInstructionType::Sub => "sub",
+        };
+
+        let content = match self.action {
+            ArithmeticInstructionAction::ImToAcc => im_to_acc(content_iter, first, second),
+            ArithmeticInstructionAction::ImToRm => {
+                Im2Rm::new(content_iter, first, second, true).format_as_arithmetic()
+            }
+            ArithmeticInstructionAction::RmToEither => rm_to_reg(content_iter, first, second),
+        };
+
+        format!("{} {}", operation, content)
     }
 }
 
@@ -199,24 +261,23 @@ fn process_binary<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
         writeln!(
             out,
             "{}",
-            match first {
-                0b1000_1000..=0b1000_1011 =>
-                    format!("mov {}", rm_to_reg(&mut content_iter, first, second)),
-                0b0000_0000..=0b0000_0011 =>
-                    format!("add {}", rm_to_reg(&mut content_iter, first, second)),
-                0b1100_0110..=0b1100_0111 => format!(
-                    "mov {}",
-                    Im2Rm::new(&mut content_iter, first, second, false).format_as_mov()
-                ),
-                0b1000_0000..=0b1000_0011 => format!(
-                    "add {}",
-                    Im2Rm::new(&mut content_iter, first, second, true).format_as_add()
-                ),
-                0b0000_0100..=0b0000_0101 =>
-                    format!("add {}", im_to_acc(&mut content_iter, first, second)),
-                0b1010_0000..=0b1010_0011 => mov_acc(&mut content_iter, first, second),
-                0b1011_0000..=0b1011_1111 => mov_immediate_to_reg(&mut content_iter, first, second),
-                _ => panic!("unknown operand"),
+            if let Some(arimthmetic_inst) = ArithmeticInstruction::from(first, second) {
+                arimthmetic_inst.parse_and_format(first, second, &mut content_iter)
+            } else {
+                match first {
+                    0b1100_0110..=0b1100_0111 => format!(
+                        "mov {}",
+                        Im2Rm::new(&mut content_iter, first, second, false).format_as_mov()
+                    ),
+                    0b1000_1000..=0b1000_1011 => {
+                        format!("mov {}", rm_to_reg(&mut content_iter, first, second))
+                    }
+                    0b1010_0000..=0b1010_0011 => mov_acc(&mut content_iter, first, second),
+                    0b1011_0000..=0b1011_1111 => {
+                        mov_immediate_to_reg(&mut content_iter, first, second)
+                    }
+                    _ => panic!("unknown operand"),
+                }
             }
         )
         .unwrap()
