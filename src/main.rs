@@ -1,4 +1,4 @@
-use std::{fmt::format, io::Write, slice::Iter};
+use std::{io::Write, slice::Iter};
 
 const W_TO_REG_NAME: &'static [&'static str; 24] = &[
     "al", "cl", "dl", "bl", "ah", "ch", "dh", "bh", // w = 0
@@ -89,7 +89,7 @@ impl Im2Rm {
         let s = first >> 1 & 0b1;
         let w = first & 0b1;
 
-        assert!(second & 0b00111000 == 0);
+        // assert!(second & 0b00111000 == 0);
         let _mod = second >> 6 & 0b11;
         let rm = second & 0b111;
 
@@ -250,6 +250,47 @@ impl ArithmeticInstruction {
     }
 }
 
+fn parse_and_format_jump(first: &u8, second: &u8) -> Option<String> {
+    let Some(jump_code) = (match first {
+        0b0111_0100 => Some("je"),
+        0b0111_1100 => Some("jl"),
+        0b0111_1110 => Some("jle"),
+        0b0111_0010 => Some("jb"),
+        0b0111_0110 => Some("jbe"),
+        0b0111_1010 => Some("jp"),
+        0b0111_0000 => Some("jo"),
+        0b0111_1000 => Some("js"),
+        0b0111_0101 => Some("jne"),
+        0b0111_1101 => Some("jnl"),
+        0b0111_1111 => Some("jnle"),
+        0b0111_0011 => Some("jnb"),
+        0b0111_0111 => Some("jnbe"),
+        0b0111_1011 => Some("jnp"),
+        0b0111_0001 => Some("jno"),
+        0b0111_1001 => Some("jns"),
+        0b1110_0010 => Some("loop"),
+        0b1110_0001 => Some("loopz"),
+        0b1110_0000 => Some("loopnz"),
+        0b1110_0011 => Some("jcxz"),
+        _ => None,
+    }) else {
+        return None;
+    };
+
+    let signed_second = *second as i8;
+    Some(format!(
+        "{} ${}",
+        jump_code,
+        if signed_second + 2 > 0 {
+            format!("+{}+0", signed_second + 2)
+        } else if signed_second + 2 == 0 {
+            "+0".to_string()
+        } else {
+            format!("{}+0", signed_second + 2)
+        }
+    ))
+}
+
 fn process_binary<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
     writeln!(out, "bits 16\n").unwrap();
     loop {
@@ -263,6 +304,8 @@ fn process_binary<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
             "{}",
             if let Some(arimthmetic_inst) = ArithmeticInstruction::from(first, second) {
                 arimthmetic_inst.parse_and_format(first, second, &mut content_iter)
+            } else if let Some(formatted_instr) = parse_and_format_jump(first, second) {
+                formatted_instr
             } else {
                 match first {
                     0b1100_0110..=0b1100_0111 => format!(
@@ -276,7 +319,7 @@ fn process_binary<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
                     0b1011_0000..=0b1011_1111 => {
                         mov_immediate_to_reg(&mut content_iter, first, second)
                     }
-                    _ => panic!("unknown operand"),
+                    _ => panic!("unknown operand: {:08b}", first),
                 }
             }
         )
