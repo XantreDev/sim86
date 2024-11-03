@@ -1,4 +1,14 @@
+use bitflags::bitflags;
 use std::{io::Write, slice::Iter};
+
+bitflags! {
+    struct InstructionFlags: u8 {
+        const Lock = 0b0000_0001;
+        const Rep = 0b0000_0010;
+        const Segment = 0b0000_0100;
+        const Wide = 0b0000_1000;
+    }
+}
 
 const W_TO_REG_NAME: &'static [&'static str; 24] = &[
     "al", "cl", "dl", "bl", "ah", "ch", "dh", "bh", // w = 0
@@ -6,11 +16,200 @@ const W_TO_REG_NAME: &'static [&'static str; 24] = &[
     "bx+si", "bx+di", "bp+si", "bp+di", "si", "di", "bp", "bx", // rm2registers
 ];
 
-fn decode_reg(reg: u8, w: u8) -> &'static str {
-    W_TO_REG_NAME[usize::from(w) * 8 + usize::from(reg)]
+#[rustfmt::skip]
+#[derive(Debug, Clone, Copy)]
+enum Register {
+    Ax, Al, Ah,
+    Bx, Bl, Bh,
+    Cx, Cl, Ch,
+    Dx, Dl, Dh,
+
+    Si,
+    Di,
+    Bp,
+    Sp,
+    Ip,
+    Cs,
+}
+#[derive(Debug, Clone, Copy)]
+struct Operand {
+    a: Option<Register>,
+    b: Option<Register>,
+    immidiate: Option<i16>,
 }
 
-fn decode_address(content_iter: &mut Iter<u8>, _mod: u8, rm: u8) -> String {
+impl Operand {
+    fn is_empty(&self) -> bool {
+        match self {
+            Operand {
+                a: None,
+                b: None,
+                immidiate: None,
+            } => true,
+            _ => false,
+        }
+    }
+    fn empty() -> Operand {
+        Operand {
+            a: None,
+            b: None,
+            immidiate: None,
+        }
+    }
+
+    fn register(register: Register) -> Operand {
+        Operand {
+            a: Some(register),
+            b: None,
+            immidiate: None,
+        }
+    }
+    fn immidiate(immidiate: i16) -> Operand {
+        Operand {
+            a: None,
+            b: None,
+            immidiate: Some(immidiate),
+        }
+    }
+}
+
+enum OpCode {
+    Mov,
+    Add,
+    Sub,
+    Cmp,
+
+    // jumps
+    Je,
+    Jl,
+    Jle,
+    Jb,
+    Jbe,
+    Jp,
+    Jo,
+    Js,
+    Jne,
+    Jnl,
+    Jnle,
+    Jnb,
+    Jnbe,
+    Jnp,
+    Jno,
+    Jns,
+    Loop,
+    Loopz,
+    Loopnz,
+    Jcxz,
+}
+
+struct Instruction {
+    op_code: OpCode,
+    left_operand: Operand,
+    right_operand: Operand,
+}
+
+trait Formattable {
+    fn format(&self) -> String;
+}
+
+impl Formattable for Register {
+    fn format(&self) -> String {
+        match self {
+            Register::Ax => "ax",
+            Register::Ah => "ah",
+            Register::Al => "al",
+
+            Register::Bx => "bx",
+            Register::Bh => "bh",
+            Register::Bl => "bl",
+            Register::Bp => "bp",
+
+            Register::Cx => "cx",
+            Register::Cl => "cl",
+            Register::Ch => "ch",
+            Register::Cs => "cs",
+
+            Register::Dx => "dx",
+            Register::Dl => "dl",
+            Register::Dh => "dh",
+            Register::Di => "di",
+
+            Register::Ip => "ip",
+            Register::Si => "si",
+            Register::Sp => "sp",
+        }
+        .to_string()
+    }
+}
+impl Formattable for OpCode {
+    fn format(&self) -> String {
+        match self {
+            OpCode::Add => "add",
+            OpCode::Cmp => "cmp",
+            OpCode::Mov => "mov",
+            OpCode::Sub => "sub",
+
+            OpCode::Je => "je",
+            OpCode::Jl => "jl",
+            OpCode::Jle => "jle",
+            OpCode::Jb => "jb",
+            OpCode::Jbe => "jbe",
+            OpCode::Jp => "jp",
+            OpCode::Jo => "jo",
+            OpCode::Js => "js",
+            OpCode::Jne => "jne",
+            OpCode::Jnl => "jnl",
+            OpCode::Jnle => "jnle",
+            OpCode::Jnb => "jnb",
+            OpCode::Jnbe => "jnbe",
+            OpCode::Jnp => "jnp",
+            OpCode::Jno => "jno",
+            OpCode::Jns => "jns",
+            OpCode::Loop => "loop",
+            OpCode::Loopz => "loopz",
+            OpCode::Loopnz => "loopnz",
+            OpCode::Jcxz => "jcxz",
+        }
+        .to_string()
+    }
+}
+
+impl Formattable for Operand {
+    fn format(&self) -> String {
+        fn pad_immidiate(immediate: Option<i16>) -> String {
+            match immediate {
+                Some(imm) if imm > 0 => format!("+{}", imm),
+                Some(imm) if imm < 0 => imm.to_string(),
+                _ => "".to_string(),
+            }
+        }
+        match (&self.a, &self.b, self.immidiate) {
+            (Some(a), Some(b), immediate) => {
+                format!("{}+{}{}", a.format(), b.format(), pad_immidiate(immediate))
+            }
+            (Some(a), None, None) => a.format(),
+            (None, None, Some(immediate)) => immediate.to_string(),
+            _ => panic!("unsupported {:?}", self),
+        }
+    }
+}
+
+fn decode_reg(reg: u8, w: u8) -> &'static Register {
+    #[rustfmt::skip]
+    const W_TO_REG: &'static[Register] = &[
+        Register::Al, Register::Cl, Register::Dl, Register::Bl, Register::Ah, Register::Ch , Register::Dh, Register::Bh, // w = 0
+        Register::Ax, Register::Cx, Register::Dx, Register::Bx, Register::Sp, Register::Bp, Register::Si, Register::Di, // w = 1
+    ];
+
+    &W_TO_REG[usize::from(w) * 8 + usize::from(reg)]
+}
+
+// enum AddressOrReg {
+//     Reg(Register),
+//     Address(i16),
+// }
+
+fn decode_address(content_iter: &mut Iter<u8>, _mod: u8, rm: u8) -> Operand {
     let mut displacement_number: u16 = 0;
     let is_direct_address = _mod == 0b00 && rm == 0b110;
     let displacement_bytes = if is_direct_address { 2 } else { _mod };
@@ -26,31 +225,62 @@ fn decode_address(content_iter: &mut Iter<u8>, _mod: u8, rm: u8) -> String {
     }
 
     if is_direct_address {
-        return format!("[{}]", displacement_number);
+        return Operand {
+            a: None,
+            b: None,
+            immidiate: Some(displacement_number as i16),
+        };
     }
-    let registers_sum = W_TO_REG_NAME[usize::from(16 + rm)].to_string();
+
+    static FIRST_ADDRESS: &'static [Register] = &[
+        Register::Bx,
+        Register::Bx,
+        Register::Bp,
+        Register::Bp,
+        Register::Si,
+        Register::Di,
+        Register::Bp,
+        Register::Bx,
+    ];
+    static SECOND_ADDRESS: &'static [Option<Register>] = &[
+        Some(Register::Si),
+        Some(Register::Di),
+        Some(Register::Si),
+        Some(Register::Di),
+        None,
+        None,
+        None,
+        None,
+    ];
+    // const FIRST_ADDRESS: &'static [Register] = &["bx+si", "bx+di", "bp+si", "bp+di", "si", "di", "bp", "bx"} // rm2registers
+    let a_reg = &FIRST_ADDRESS[usize::from(rm)];
+    let b_reg = &SECOND_ADDRESS[usize::from(rm)];
 
     match (displacement_number, displacement_bytes) {
-        (0, _) => {
-            format!("[{}]", registers_sum)
-        }
-        (displacement_number, 1) if displacement_number >= 1 << 7 => {
-            format!(
-                "[{}-{}]",
-                registers_sum,
-                (1 + !displacement_number) & 0b11111111
-            )
-        }
-        (displacement_number, 2) if displacement_number >= 1 << 15 => {
-            format!("[{}-{}]", registers_sum, 1 + !displacement_number)
-        }
-        (displacement_number, _) => {
-            format!("[{}+{}]", registers_sum, displacement_number)
-        }
+        (0, _) => Operand {
+            a: Some(*a_reg),
+            b: *b_reg,
+            immidiate: None,
+        },
+        (displacement_number, 1) if displacement_number >= 1 << 7 => Operand {
+            a: Some(*a_reg),
+            b: *b_reg,
+            immidiate: Some(-(displacement_number as i16)),
+        },
+        (displacement_number, _) => Operand {
+            a: Some(*a_reg),
+            b: *b_reg,
+            immidiate: Some(displacement_number as i16),
+        },
     }
 }
 
-fn rm_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
+struct Operands {
+    left_operand: Operand,
+    right_operand: Operand,
+}
+
+fn rm_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Operands {
     let w = first & 0b1;
     let d = (first >> 1) & 0b1;
 
@@ -59,8 +289,12 @@ fn rm_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
     let rm = second & 0b111;
 
     let address_or_reg = match _mod {
-        0b00..=0b10 => &decode_address(content_iter, _mod, rm),
-        0b11 => decode_reg(rm, w),
+        0b00..=0b10 => decode_address(content_iter, _mod, rm),
+        0b11 => Operand {
+            a: Some(*decode_reg(rm, w)),
+            b: None,
+            immidiate: None,
+        },
         _ => {
             panic!("invalid mod processing");
         }
@@ -85,7 +319,7 @@ struct Im2Rm {
 
 impl Im2Rm {
     // mov have no s byte. it always 1 in that case
-    fn new(content_iter: &mut Iter<u8>, first: &u8, second: &u8, is_arthmetic: bool) -> Self {
+    fn new(content_iter: &mut Iter<u8>, first: &u8, second: &u8, is_arthmetic: bool) -> Operand {
         let s = first >> 1 & 0b1;
         let w = first & 0b1;
 
@@ -94,8 +328,12 @@ impl Im2Rm {
         let rm = second & 0b111;
 
         let address_or_reg = match _mod {
-            0b00..=0b10 => &decode_address(content_iter, _mod, rm),
-            0b11 => decode_reg(rm, w),
+            0b00..=0b10 => decode_address(content_iter, _mod, rm),
+            0b11 => Operand {
+                a: Some(*decode_reg(rm, w)),
+                b: None,
+                immidiate: None,
+            },
             _ => {
                 panic!("invalid mod processing");
             }
@@ -164,7 +402,7 @@ fn mov_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
     }
 }
 
-fn im_to_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
+fn im_to_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Operands {
     let w = first & 0b1;
 
     let mut displacement_number: u16 = u16::from(*(second));
@@ -172,11 +410,11 @@ fn im_to_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
         displacement_number |= u16::from(*(content_iter.next().unwrap())) << 8;
     }
 
-    if w == 0 {
-        format!("al, {}", displacement_number)
-    } else {
-        format!("ax, {}", displacement_number)
+    Operands {
+        left_operand: Operand::register(if w == 0 { Register::Al } else { Register::Ax }),
+        right_operand: Operand::immidiate(displacement_number as i16),
     }
+    // format!("al, {}", displacement_number)
 }
 
 // rm - stands for Register or Memory
@@ -292,6 +530,42 @@ fn parse_and_format_jump(first: &u8, second: &u8) -> Option<String> {
 }
 
 fn process_binary<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
+    writeln!(out, "bits 16\n").unwrap();
+    loop {
+        let Some(first) = content_iter.next() else {
+            return;
+        };
+        let second = content_iter.next().unwrap();
+
+        writeln!(
+            out,
+            "{}",
+            if let Some(arimthmetic_inst) = ArithmeticInstruction::from(first, second) {
+                arimthmetic_inst.parse_and_format(first, second, &mut content_iter)
+            } else if let Some(formatted_instr) = parse_and_format_jump(first, second) {
+                formatted_instr
+            } else {
+                match first {
+                    0b1100_0110..=0b1100_0111 => format!(
+                        "mov {}",
+                        Im2Rm::new(&mut content_iter, first, second, false).format_as_mov()
+                    ),
+                    0b1000_1000..=0b1000_1011 => {
+                        format!("mov {}", rm_to_reg(&mut content_iter, first, second))
+                    }
+                    0b1010_0000..=0b1010_0011 => mov_acc(&mut content_iter, first, second),
+                    0b1011_0000..=0b1011_1111 => {
+                        mov_immediate_to_reg(&mut content_iter, first, second)
+                    }
+                    _ => panic!("unknown operand: {:08b}", first),
+                }
+            }
+        )
+        .unwrap()
+    }
+}
+
+fn disassemble<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
     writeln!(out, "bits 16\n").unwrap();
     loop {
         let Some(first) = content_iter.next() else {
