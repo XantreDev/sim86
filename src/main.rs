@@ -1,5 +1,5 @@
 use bitflags::bitflags;
-use std::{io::Write, slice::Iter};
+use std::{io::Write, slice::Iter,};
 
 bitflags! {
     struct InstructionFlags: u8 {
@@ -32,44 +32,36 @@ enum Register {
     Cs,
 }
 #[derive(Debug, Clone, Copy)]
-struct Operand {
-    a: Option<Register>,
-    b: Option<Register>,
-    immidiate: Option<i16>,
+enum Operand {
+    Address(
+        Option<Register>,
+        Option<Register>,
+        Option<i16>,
+    ),
+    JumpDisplacement(i8),
+    Empty,
+    Immediate(i16)
 }
 
 impl Operand {
     fn is_empty(&self) -> bool {
         match self {
-            Operand {
-                a: None,
-                b: None,
-                immidiate: None,
-            } => true,
+            Operand::Empty => true,
             _ => false,
         }
     }
     fn empty() -> Operand {
-        Operand {
-            a: None,
-            b: None,
-            immidiate: None,
-        }
+        Operand::Empty
     }
 
     fn register(register: Register) -> Operand {
-        Operand {
-            a: Some(register),
-            b: None,
-            immidiate: None,
-        }
+        Self::Address(
+            Some(register),
+            None,
+            None)
     }
-    fn immidiate(immidiate: i16) -> Operand {
-        Operand {
-            a: None,
-            b: None,
-            immidiate: Some(immidiate),
-        }
+    fn displacement(displacement: u16) -> Operand {
+        Self::Address(None, None, Some(displacement as i16))
     }
 }
 
@@ -104,6 +96,7 @@ enum OpCode {
 
 struct Instruction {
     op_code: OpCode,
+    flags: InstructionFlags,
     left_operand: Operand,
     right_operand: Operand,
 }
@@ -176,20 +169,22 @@ impl Formattable for OpCode {
 
 impl Formattable for Operand {
     fn format(&self) -> String {
-        fn pad_immidiate(immediate: Option<i16>) -> String {
+        fn pad_displacement(immediate: &Option<i16>) -> String {
             match immediate {
-                Some(imm) if imm > 0 => format!("+{}", imm),
-                Some(imm) if imm < 0 => imm.to_string(),
+                Some(imm) if *imm > 0 => format!("+{}", imm),
+                Some(imm) if *imm < 0 => imm.to_string(),
                 _ => "".to_string(),
             }
         }
-        match (&self.a, &self.b, self.immidiate) {
-            (Some(a), Some(b), immediate) => {
-                format!("{}+{}{}", a.format(), b.format(), pad_immidiate(immediate))
+        match self {
+            Self::Address(Some(a), Some(b), immediate) => {
+                format!("[{}+{}{}]", a.format(), b.format(), pad_displacement(immediate))
             }
-            (Some(a), None, None) => a.format(),
-            (None, None, Some(immediate)) => immediate.to_string(),
-            _ => panic!("unsupported {:?}", self),
+            Self::Address(Some(a), Option::None, Option::None) => a.format(),
+            Self::Address(Option::None, Option::None, Some(displacement)) => format!("[{}]", displacement),
+            Self::Address(_,_,_) => panic!("unsupported {:?}", self),
+            Self::Empty => "".to_string(),
+            Self::Immediate(immediate) => immediate.to_string()
         }
     }
 }
@@ -225,11 +220,8 @@ fn decode_address(content_iter: &mut Iter<u8>, _mod: u8, rm: u8) -> Operand {
     }
 
     if is_direct_address {
-        return Operand {
-            a: None,
-            b: None,
-            immidiate: Some(displacement_number as i16),
-        };
+        return Operand::Address(None, None,
+            Some(displacement_number as i16));
     }
 
     static FIRST_ADDRESS: &'static [Register] = &[
@@ -257,21 +249,21 @@ fn decode_address(content_iter: &mut Iter<u8>, _mod: u8, rm: u8) -> Operand {
     let b_reg = &SECOND_ADDRESS[usize::from(rm)];
 
     match (displacement_number, displacement_bytes) {
-        (0, _) => Operand {
-            a: Some(*a_reg),
-            b: *b_reg,
-            immidiate: None,
-        },
-        (displacement_number, 1) if displacement_number >= 1 << 7 => Operand {
-            a: Some(*a_reg),
-            b: *b_reg,
-            immidiate: Some(-(displacement_number as i16)),
-        },
-        (displacement_number, _) => Operand {
-            a: Some(*a_reg),
-            b: *b_reg,
-            immidiate: Some(displacement_number as i16),
-        },
+        (0, _) => Operand::Address(
+            Some(*a_reg),
+            *b_reg,
+            None,
+        ),
+        (displacement_number, 1) if displacement_number >= 1 << 7 => Operand::Address(
+            Some(*a_reg),
+            *b_reg,
+            Some(-(displacement_number as i16))
+        ),
+        (displacement_number, _) => Operand::Address(
+            Some(*a_reg),
+            *b_reg,
+            Some(displacement_number as i16),
+        ),
     }
 }
 
@@ -280,7 +272,7 @@ struct Operands {
     right_operand: Operand,
 }
 
-fn rm_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Operands {
+fn rm_to_reg(op_code: OpCode, content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Instruction {
     let w = first & 0b1;
     let d = (first >> 1) & 0b1;
 
@@ -290,68 +282,96 @@ fn rm_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Operands {
 
     let address_or_reg = match _mod {
         0b00..=0b10 => decode_address(content_iter, _mod, rm),
-        0b11 => Operand {
-            a: Some(*decode_reg(rm, w)),
-            b: None,
-            immidiate: None,
-        },
+        0b11 => Operand::Address(
+            Some(*decode_reg(rm, w)),
+            None,
+            None,
+        ),
         _ => {
             panic!("invalid mod processing");
         }
     };
 
-    let reg_name = decode_reg(reg, w);
-    let (left, right) = if d == 1 {
-        (reg_name, address_or_reg)
-    } else {
-        (address_or_reg, reg_name)
-    };
+    let reg_name = Operand::register(*decode_reg(reg, w));
 
-    format!("{}, {}", left, right)
+    Instruction {
+        left_operand: address_or_reg,
+        right_operand: reg_name,
+        flags: if d == 1{ InstructionFlags::Wide } else  {InstructionFlags::empty()},
+        op_code,
+    }
 }
 
-struct Im2Rm {
-    address: String,
-    s: bool,
-    w: bool,
-    immediate: u16,
+fn immediate_to_rm(op_code: OpCode, first: &u8, second: &u8, content_iter: &mut Iter<u8>, implicit_sign_bit: Option<bool>) -> Instruction {
+    let sign_extend = if let Some(sign_bit) = implicit_sign_bit { sign_bit} else { (first >> 1 & 0b1) == 0b1 };
+    let wide = first & 0b1;
+
+    let _mod = second >> 6 & 0b11;
+    let rm = second & 0b111;
+
+    let address = match _mod {
+        0b00..=0b10 => decode_address(content_iter, _mod, rm),
+        0b11 => Operand::register(*decode_reg(rm, wide)),
+        _ => {
+            panic!("invalid mod processing");
+        }
+    };
+
+    let immediate = {
+        let mut init = 0;
+        init |= u16::from(*content_iter.next().unwrap());
+
+        if (wide == 0b1 && !sign_extend) {
+            init |= u16::from(*content_iter.next().unwrap()) << 8;
+        }
+
+        Operand::Immediate(init as i16)
+    };
+
+
+    Instruction {
+        op_code,
+        flags: InstructionFlags::empty(),
+        left_operand: address,
+        right_operand: immediate,
+    }
 }
 
 impl Im2Rm {
     // mov have no s byte. it always 1 in that case
     fn new(content_iter: &mut Iter<u8>, first: &u8, second: &u8, is_arthmetic: bool) -> Operand {
-        let s = first >> 1 & 0b1;
-        let w = first & 0b1;
+        // let s = first >> 1 & 0b1;
+        // let w = first & 0b1;
 
-        // assert!(second & 0b00111000 == 0);
-        let _mod = second >> 6 & 0b11;
-        let rm = second & 0b111;
+        // // assert!(second & 0b00111000 == 0);
+        // let _mod = second >> 6 & 0b11;
+        // let rm = second & 0b111;
 
-        let address_or_reg = match _mod {
-            0b00..=0b10 => decode_address(content_iter, _mod, rm),
-            0b11 => Operand {
-                a: Some(*decode_reg(rm, w)),
-                b: None,
-                immidiate: None,
-            },
-            _ => {
-                panic!("invalid mod processing");
-            }
-        };
+        // let address_or_reg = match _mod {
+        //     0b00..=0b10 => decode_address(content_iter, _mod, rm),
+        //     0b11 => Operand {
+        //         a: Some(*decode_reg(rm, w)),
+        //         b: None,
+        //         immidiate: None,
+        //     },
+        //     _ => {
+        //         panic!("invalid mod processing");
+        //     }
+        // };
 
-        let mut immediate: u16 = 0;
-        immediate |= u16::from(*content_iter.next().unwrap());
+        // let mut immediate: u16 = 0;
+        // immediate |= u16::from(*content_iter.next().unwrap());
 
-        if w == 0b1 && (!is_arthmetic || s == 0b0) {
-            immediate |= u16::from(*content_iter.next().unwrap()) << 8;
-        }
+        // if w == 0b1 && (!is_arthmetic || s == 0b0) {
+        //     immediate |= u16::from(*content_iter.next().unwrap()) << 8;
+        // }
 
-        Im2Rm {
-            s: s == 0b1,
-            w: w == 0b1,
-            immediate,
-            address: address_or_reg.into(),
-        }
+        // Im2Rm {
+        //     s: s == 0b1,
+        //     w: w == 0b1,
+        //     immediate,
+        //     address: address_or_reg.into(),
+        // }
     }
 
     fn format_as_mov(&self) -> String {
@@ -368,7 +388,7 @@ impl Im2Rm {
     }
 }
 
-fn mov_immediate_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
+fn mov_immediate_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Instruction {
     assert!(first >> 4 == 0b1011);
 
     let w = first >> 3 & 0b1;
@@ -382,10 +402,16 @@ fn mov_immediate_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) ->
 
     let reg_name = decode_reg(reg, w);
 
-    format!("mov {}, {}", reg_name, data)
+    // format!("mov {}, {}", reg_name, data)
+   Instruction {
+       op_code: OpCode::Mov,
+       left_operand: Operand::register(*reg_name),
+       right_operand: Operand::Immediate(data as i16),
+       flags: InstructionFlags::empty(),
+   }
 }
 
-fn mov_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
+fn mov_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Instruction {
     assert!(first >> 2 == 0b101000);
     let w = first & 0b1;
     let to_acc = (first >> 1 & 0b1) == 0;
@@ -396,13 +422,26 @@ fn mov_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> String {
     }
 
     if to_acc {
-        format!("mov ax, [{}]", displacement_number)
+        // format!("mov ax, [{}]", displacement_number)
+    Instruction {
+        op_code: OpCode::Mov,
+        left_operand: Operand::register(Register::Ax),
+        flags: InstructionFlags::empty(),
+        right_operand: Operand::displacement(displacement_number),
+    }
     } else {
-        format!("mov [{}], ax", displacement_number)
+        Instruction {
+            op_code: OpCode::Mov,
+            left_operand: Operand::displacement(displacement_number),
+            flags: InstructionFlags::empty(),
+            right_operand:
+            Operand::register(Register::Ax),
+        }
+        // format!("mov [{}], ax", displacement_number)
     }
 }
 
-fn im_to_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Operands {
+fn im_to_acc(op_code: OpCode, content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Instruction {
     let w = first & 0b1;
 
     let mut displacement_number: u16 = u16::from(*(second));
@@ -410,9 +449,11 @@ fn im_to_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Operands {
         displacement_number |= u16::from(*(content_iter.next().unwrap())) << 8;
     }
 
-    Operands {
+    Instruction {
         left_operand: Operand::register(if w == 0 { Register::Al } else { Register::Ax }),
-        right_operand: Operand::immidiate(displacement_number as i16),
+        right_operand: Operand::Immediate(displacement_number as i16),
+        flags: if w == 1 {InstructionFlags::Wide} else {InstructionFlags::empty()},
+        op_code,
     }
     // format!("al, {}", displacement_number)
 }
@@ -435,15 +476,15 @@ struct ArithmeticInstruction {
 }
 
 impl ArithmeticInstruction {
-    fn from(first: &u8, second: &u8) -> Option<ArithmeticInstruction> {
+    fn from(first: &u8, second: &u8) -> Instruction {
         let is_immediate_to_rm = first >> 2 == 0b10_0000;
         let middle_bits_to_operation = |byte: &u8| match (byte >> 3) & 0b111 {
-            0b000 => Some(ArithmeticInstructionType::Add),
-            0b101 => Some(ArithmeticInstructionType::Sub),
-            0b111 => Some(ArithmeticInstructionType::Cmp),
+            0b000 => Some(OpCode::Add),
+            0b101 => Some(OpCode::Sub),
+            0b111 => Some(OpCode::Cmp),
             _ => None,
         };
-
+        let op_code = middle_bits_to_operation(if is_immediate_to_rm { second } else {first}) ;
         if is_immediate_to_rm {
             return middle_bits_to_operation(second).map(|it| ArithmeticInstruction {
                 t: it,
@@ -477,129 +518,173 @@ impl ArithmeticInstruction {
         };
 
         let content = match self.action {
-            ArithmeticInstructionAction::ImToAcc => im_to_acc(content_iter, first, second),
+            ArithmeticInstructionAction::ImToAcc => im_to_acc(operation, content_iter, first, second),
             ArithmeticInstructionAction::ImToRm => {
                 Im2Rm::new(content_iter, first, second, true).format_as_arithmetic()
             }
-            ArithmeticInstructionAction::RmToEither => rm_to_reg(content_iter, first, second),
+            ArithmeticInstructionAction::RmToEither => rm_to_reg(operation, content_iter, first, second),
         };
 
         format!("{} {}", operation, content)
     }
 }
 
-fn parse_and_format_jump(first: &u8, second: &u8) -> Option<String> {
-    let Some(jump_code) = (match first {
-        0b0111_0100 => Some("je"),
-        0b0111_1100 => Some("jl"),
-        0b0111_1110 => Some("jle"),
-        0b0111_0010 => Some("jb"),
-        0b0111_0110 => Some("jbe"),
-        0b0111_1010 => Some("jp"),
-        0b0111_0000 => Some("jo"),
-        0b0111_1000 => Some("js"),
-        0b0111_0101 => Some("jne"),
-        0b0111_1101 => Some("jnl"),
-        0b0111_1111 => Some("jnle"),
-        0b0111_0011 => Some("jnb"),
-        0b0111_0111 => Some("jnbe"),
-        0b0111_1011 => Some("jnp"),
-        0b0111_0001 => Some("jno"),
-        0b0111_1001 => Some("jns"),
-        0b1110_0010 => Some("loop"),
-        0b1110_0001 => Some("loopz"),
-        0b1110_0000 => Some("loopnz"),
-        0b1110_0011 => Some("jcxz"),
-        _ => None,
-    }) else {
-        return None;
-    };
+fn parse_jump(op_code: OpCode, second: &u8) -> Instruction {
+    // let op_code = (match first {
+    //     0b0111_0100 => (OpCode::Je),
+    //     0b0111_1100 => (OpCode::Jl),
+    //     0b0111_1110 => (OpCode::Jle),
+    //     0b0111_0010 => (OpCode::Jb),
+    //     0b0111_0110 => (OpCode::Jbe),
+    //     0b0111_1010 => (OpCode::Jp),
+    //     0b0111_0000 => (OpCode::Jo),
+    //     0b0111_1000 => (OpCode::Js),
+    //     0b0111_0101 => (OpCode::Jne),
+    //     0b0111_1101 => (OpCode::Jnl),
+    //     0b0111_1111 => (OpCode::Jnle),
+    //     0b0111_0011 => (OpCode::Jnb),
+    //     0b0111_0111 => (OpCode::Jnbe),
+    //     0b0111_1011 => (OpCode::Jnp),
+    //     0b0111_0001 => (OpCode::Jno),
+    //     0b0111_1001 => (OpCode::Jns),
+    //     0b1110_0010 => (OpCode::Loop),
+    //     0b1110_0001 => (OpCode::Loopz),
+    //     0b1110_0000 => (OpCode::Loopnz),
+    //     0b1110_0011 => (OpCode::Jcxz),
+    //     _ => return None
+    // });
 
     let signed_second = *second as i8;
-    Some(format!(
-        "{} ${}",
-        jump_code,
-        if signed_second + 2 > 0 {
-            format!("+{}+0", signed_second + 2)
-        } else if signed_second + 2 == 0 {
-            "+0".to_string()
-        } else {
-            format!("{}+0", signed_second + 2)
-        }
-    ))
+
+    Instruction {
+        flags: InstructionFlags::empty(),
+        op_code,
+        left_operand: Operand::JumpDisplacement(signed_second),
+        right_operand: Operand::Empty
+    }
+    // Some(format!(
+    //     "{} ${}",
+    //     jump_code,
+    //     if signed_second + 2 > 0 {
+    //         format!("+{}+0", signed_second + 2)
+    //     } else if signed_second + 2 == 0 {
+    //         "+0".to_string()
+    //     } else {
+    //         format!("{}+0", signed_second + 2)
+    //     }
+    // ))
 }
 
-fn process_binary<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
-    writeln!(out, "bits 16\n").unwrap();
+macro_rules! binary_match {
+    ($($i:ident)* => $res:block) => {
+
+    };
+}
+
+fn process_binary(mut content_iter: Iter<u8>) -> Vec<Instruction> {
+    let mut result: Vec<Instruction> = vec!();
     loop {
         let Some(first) = content_iter.next() else {
-            return;
+            return result;
         };
         let second = content_iter.next().unwrap();
 
-        writeln!(
-            out,
-            "{}",
-            if let Some(arimthmetic_inst) = ArithmeticInstruction::from(first, second) {
-                arimthmetic_inst.parse_and_format(first, second, &mut content_iter)
-            } else if let Some(formatted_instr) = parse_and_format_jump(first, second) {
-                formatted_instr
-            } else {
-                match first {
-                    0b1100_0110..=0b1100_0111 => format!(
-                        "mov {}",
-                        Im2Rm::new(&mut content_iter, first, second, false).format_as_mov()
-                    ),
-                    0b1000_1000..=0b1000_1011 => {
-                        format!("mov {}", rm_to_reg(&mut content_iter, first, second))
-                    }
-                    0b1010_0000..=0b1010_0011 => mov_acc(&mut content_iter, first, second),
-                    0b1011_0000..=0b1011_1111 => {
-                        mov_immediate_to_reg(&mut content_iter, first, second)
-                    }
-                    _ => panic!("unknown operand: {:08b}", first),
-                }
-            }
-        )
-        .unwrap()
-    }
-}
+        let get_arithmetic_op_code = || match (second >> 3) & 0b111 {
+                                    0b000 => OpCode::Add,
+                                    0b101 => OpCode::Sub,
+                                    0b111 => OpCode::Cmp,
+                                    _ => panic!("unknown arhithmetic operand {}", second >> 3 & 0b111),
+                                };
 
-fn disassemble<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
-    writeln!(out, "bits 16\n").unwrap();
-    loop {
-        let Some(first) = content_iter.next() else {
-            return;
+         let next = match first {
+             // movs
+            0b1010_0000..=0b1010_0011 => mov_acc(&mut content_iter, first, second),
+            0b1011_0000..=0b1011_1111 => {
+                mov_immediate_to_reg(&mut content_iter, first, second)
+            },
+            0b1000_1000..=0b1000_1011 => rm_to_reg(OpCode::Mov,&mut content_iter, first, second),
+            0b1100_0110..=0b1100_0111 => immediate_to_rm(OpCode::Mov, first, second, &mut content_iter, Some(false)),
+
+            0b100000_00..=0b100000_11  => immediate_to_rm(
+                get_arithmetic_op_code(), first,
+                second, &mut content_iter, None),
+
+            0b00_000_0_00..=0b00_000_0_11 |
+            0b00_101_0_00..=0b00_101_0_11 |
+            0b00_111_0_00..=0b00_111_0_11
+                => rm_to_reg(get_arithmetic_op_code(), &mut content_iter, first, second),
+            // binary_match!(
+            //    0 0 x x x 0 x x => rm_to_reg(OpCode::Add, &mut content_iter, first, second),
+            // ),
+
+
+            // jumps
+                0b0111_0100 => parse_jump(OpCode::Je, second),
+                0b0111_1100 => parse_jump(OpCode::Jl, second),
+                0b0111_1110 => parse_jump(OpCode::Jle, second),
+                0b0111_0010 => parse_jump(OpCode::Jb, second),
+                0b0111_0110 => parse_jump(OpCode::Jbe, second),
+                0b0111_1010 => parse_jump(OpCode::Jp, second),
+                0b0111_0000 => parse_jump(OpCode::Jo, second),
+                0b0111_1000 => parse_jump(OpCode::Js, second),
+                0b0111_0101 => parse_jump(OpCode::Jne, second),
+                0b0111_1101 => parse_jump(OpCode::Jnl, second),
+                0b0111_1111 => parse_jump(OpCode::Jnle, second),
+                0b0111_0011 => parse_jump(OpCode::Jnb, second),
+                0b0111_0111 => parse_jump(OpCode::Jnbe, second),
+                0b0111_1011 => parse_jump(OpCode::Jnp, second),
+                0b0111_0001 => parse_jump(OpCode::Jno, second),
+                0b0111_1001 => parse_jump(OpCode::Jns, second),
+                0b1110_0010 => parse_jump(OpCode::Loop, second),
+                0b1110_0001 => parse_jump(OpCode::Loopz, second),
+                0b1110_0000 => parse_jump(OpCode::Loopnz, second),
+                0b1110_0011 => parse_jump(OpCode::Jcxz, second),
+            _ => panic!("unknown instruction"),
         };
-        let second = content_iter.next().unwrap();
 
-        writeln!(
-            out,
-            "{}",
-            if let Some(arimthmetic_inst) = ArithmeticInstruction::from(first, second) {
-                arimthmetic_inst.parse_and_format(first, second, &mut content_iter)
-            } else if let Some(formatted_instr) = parse_and_format_jump(first, second) {
-                formatted_instr
-            } else {
-                match first {
-                    0b1100_0110..=0b1100_0111 => format!(
-                        "mov {}",
-                        Im2Rm::new(&mut content_iter, first, second, false).format_as_mov()
-                    ),
-                    0b1000_1000..=0b1000_1011 => {
-                        format!("mov {}", rm_to_reg(&mut content_iter, first, second))
-                    }
-                    0b1010_0000..=0b1010_0011 => mov_acc(&mut content_iter, first, second),
-                    0b1011_0000..=0b1011_1111 => {
-                        mov_immediate_to_reg(&mut content_iter, first, second)
-                    }
-                    _ => panic!("unknown operand: {:08b}", first),
-                }
-            }
-        )
-        .unwrap()
+        result.push(next);
     }
 }
+
+fn write_instructions<T: Write>(instructions: Vec<Instruction>, out: &mut T) {
+    writeln!(out, "bits 16\n").unwrap();
+    instructions.iter().for_each(|it| (out.write(it.format())));
+}
+// fn disassemble<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
+//     writeln!(out, "bits 16\n").unwrap();
+//     loop {
+//         let Some(first) = content_iter.next() else {
+//             return;
+//         };
+//         let second = content_iter.next().unwrap();
+
+//         writeln!(
+//             out,
+//             "{}",
+//             if let Some(arimthmetic_inst) = ArithmeticInstruction::from(first, second) {
+//                 arimthmetic_inst.parse_and_format(first, second, &mut content_iter)
+//             } else if let Some(formatted_instr) = parse_and_format_jump(first, second) {
+//                 formatted_instr
+//             } else {
+//                 match first {
+//                     // 0b1100_0110..=0b1100_0111 => format!(
+//                     //     "mov {}",
+//                     //     Im2Rm::new(&mut content_iter, first, second, false).format_as_mov()
+//                     // ),
+//                     // 0b1000_1000..=0b1000_1011 => {
+//                     //     format!("mov {}", rm_to_reg(&mut content_iter, first, second))
+//                     // }
+//                     // 0b1010_0000..=0b1010_0011 => mov_acc(&mut content_iter, first, second),
+//                     // 0b1011_0000..=0b1011_1111 => {
+//                     //     mov_immediate_to_reg(&mut content_iter, first, second)
+//                     // }
+//                     _ => panic!("unknown operand: {:08b}", first),
+//                 }
+//             }
+//         )
+//         .unwrap()
+//     }
+// }
 
 fn read_file<T: Into<String>>(file_path: T) -> Vec<u8> {
     let Ok(content) = std::fs::read(file_path.into()) else {
@@ -623,7 +708,7 @@ fn main() {
 mod tests {
     use std::{fs::create_dir, fs::File, io::Write, path::Path, process::Command};
 
-    use crate::{process_binary, read_file};
+    use crate::{process_binary, read_file, write_instructions};
 
     #[test]
     fn test_files() {
@@ -633,7 +718,7 @@ mod tests {
             "./input/listing_0039_more_movs",
             "./input/listing_0040_challenge_movs",
             "./input/listing_0041_add_sub_cmp_jnz",
-        ];
+        ]
 
         for file_path in files {
             if std::env::var("RECOMPILE").map_or(false, |it| it == "true")
@@ -649,7 +734,9 @@ mod tests {
             let mut res: Vec<u8> = Vec::new();
             println!("checking '{}'", file_path);
 
-            process_binary(file.iter(), &mut res);
+            write_instructions(process_binary(file.iter()), &mut res);
+
+
 
             if !Path::new("./.test").exists() {
                 create_dir("./.test").unwrap();
