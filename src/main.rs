@@ -7,16 +7,6 @@ mod format;
 use format::Formattable;
 
 impl Operand {
-    fn is_empty(&self) -> bool {
-        match self {
-            Operand::Empty => true,
-            _ => false,
-        }
-    }
-
-    fn register(register: Register) -> Operand {
-        Self::Address(Some(register), None, None)
-    }
     fn displacement(displacement: i16) -> Operand {
         Self::Address(None, None, Some(displacement))
     }
@@ -110,7 +100,7 @@ mod decoder {
         Instruction {
             left_operand: if d == 0b1 { reg_name } else { address_or_reg },
             right_operand: if d == 0b1 { address_or_reg } else { reg_name },
-            flags: InstructionFlags::empty(),
+            flags: if w == 0b1 { InstructionFlags::Wide } else {InstructionFlags::empty()},
             op_code,
         }
     }
@@ -153,7 +143,7 @@ mod decoder {
 
         Instruction {
             op_code,
-            flags: InstructionFlags::empty(),
+            flags: if wide == 0b1 { InstructionFlags::Wide } else {InstructionFlags::empty()},
             left_operand: address,
             right_operand: immediate,
         }
@@ -179,9 +169,9 @@ mod decoder {
         let reg = first & 0b111;
 
         let immediate: i16 = if w == 1 {
-            i16::from(*(second) as i8)
-        } else {
             (u16::from(*(second)) | (u16::from(*(content_iter.next().unwrap())) << 8)) as i16
+        } else {
+            i16::from(*(second) as i8)
         };
 
         let reg_name = decode_reg(reg, w);
@@ -191,7 +181,7 @@ mod decoder {
             op_code: OpCode::Mov,
             left_operand: Operand::Register(*reg_name),
             right_operand: Operand::Immediate(immediate),
-            flags: InstructionFlags::empty(),
+            flags: if w == 0b1 { InstructionFlags::Wide } else {InstructionFlags::empty()},
         }
     }
 
@@ -201,25 +191,27 @@ mod decoder {
         let to_acc = (first >> 1 & 0b1) == 0;
 
         let displacement_number: i16 = if w == 1 {
-            i16::from(*(second) as i8)
-        } else {
             (u16::from(*(second)) | (u16::from(*(content_iter.next().unwrap())) << 8)) as i16
+        } else {
+            i16::from(*(second) as i8)
         };
 
+        let flags =
+             if w == 0b1 { InstructionFlags::Wide } else {InstructionFlags::empty()};
         if to_acc {
             // format!("mov ax, [{}]", displacement_number)
             Instruction {
                 op_code: OpCode::Mov,
                 left_operand: Operand::Register(Register::Ax),
-                flags: InstructionFlags::empty(),
+                flags,
                 right_operand: Operand::displacement(displacement_number),
             }
         } else {
             Instruction {
                 op_code: OpCode::Mov,
                 left_operand: Operand::displacement(displacement_number),
-                flags: InstructionFlags::empty(),
-                right_operand: Operand::register(Register::Ax),
+                flags,
+                right_operand: Operand::Register(Register::Ax),
             }
             // format!("mov [{}], ax", displacement_number)
         }
@@ -234,9 +226,9 @@ mod decoder {
         let w = first & 0b1;
 
         let immediate: i16 = if w == 1 {
-            i16::from(*(second) as i8)
-        } else {
             (u16::from(*(second)) | (u16::from(*(content_iter.next().unwrap())) << 8)) as i16
+        } else {
+            i16::from(*(second) as i8)
         };
 
         Instruction {

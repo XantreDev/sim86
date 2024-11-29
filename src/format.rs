@@ -110,11 +110,20 @@ impl Formattable for Operand {
     }
 }
 
+impl Operand {
+    fn is_eac(&self) -> bool {
+        match self {
+            Operand::Address(_,_,_) => true,
+            _ => false
+        }
+    }
+}
+
 impl Formattable for Instruction {
     fn format(&self) -> String {
         if self.op_code.is_jump() {
             assert!(matches!(self.right_operand, Operand::Empty));
-            assert!(matches!(self.right_operand, Operand::JumpDisplacement(_)));
+            assert!(matches!(self.left_operand, Operand::JumpDisplacement(_)));
             return format!("{} {}", self.op_code.format(), self.left_operand.format());
         }
 
@@ -122,7 +131,10 @@ impl Formattable for Instruction {
             "{} {}, {}",
             self.op_code.format(),
             self.left_operand.format(),
-            self.right_operand.format()
+            match (self.left_operand, self.right_operand) {
+               (Operand::Address(_,_,_),Operand::Immediate(_)) => format!("{} {}", if self.flags.contains(InstructionFlags::Wide) { "word" } else {"byte"}, self.right_operand.format()),
+               _ => self.right_operand.format()
+            }
         )
     }
 }
