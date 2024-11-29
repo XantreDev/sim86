@@ -98,11 +98,11 @@ impl Formattable for Operand {
             Self::Empty => "".to_string(),
             Self::JumpDisplacement(displacement) => {
                 if displacement + 2 > 0 {
-                    format!("+{}+0", displacement + 2)
+                    format!("$+{}+0", displacement + 2)
                 } else if displacement + 2 == 0 {
-                    "+0".to_string()
+                    "$+0".to_string()
                 } else {
-                    format!("{}+0", displacement + 2)
+                    format!("${}+0", displacement + 2)
                 }
             }
             Self::Immediate(immediate) => immediate.to_string(),
