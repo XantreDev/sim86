@@ -100,7 +100,11 @@ mod decoder {
         Instruction {
             left_operand: if d == 0b1 { reg_name } else { address_or_reg },
             right_operand: if d == 0b1 { address_or_reg } else { reg_name },
-            flags: if w == 0b1 { InstructionFlags::Wide } else {InstructionFlags::empty()},
+            flags: if w == 0b1 {
+                InstructionFlags::Wide
+            } else {
+                InstructionFlags::empty()
+            },
             op_code,
         }
     }
@@ -143,7 +147,11 @@ mod decoder {
 
         Instruction {
             op_code,
-            flags: if wide == 0b1 { InstructionFlags::Wide } else {InstructionFlags::empty()},
+            flags: if wide == 0b1 {
+                InstructionFlags::Wide
+            } else {
+                InstructionFlags::empty()
+            },
             left_operand: address,
             right_operand: immediate,
         }
@@ -181,7 +189,11 @@ mod decoder {
             op_code: OpCode::Mov,
             left_operand: Operand::Register(*reg_name),
             right_operand: Operand::Immediate(immediate),
-            flags: if w == 0b1 { InstructionFlags::Wide } else {InstructionFlags::empty()},
+            flags: if w == 0b1 {
+                InstructionFlags::Wide
+            } else {
+                InstructionFlags::empty()
+            },
         }
     }
 
@@ -196,8 +208,11 @@ mod decoder {
             i16::from(*(second) as i8)
         };
 
-        let flags =
-             if w == 0b1 { InstructionFlags::Wide } else {InstructionFlags::empty()};
+        let flags = if w == 0b1 {
+            InstructionFlags::Wide
+        } else {
+            InstructionFlags::empty()
+        };
         if to_acc {
             // format!("mov ax, [{}]", displacement_number)
             Instruction {
@@ -402,41 +417,6 @@ fn write_instructions<T: Write>(instructions: Vec<Instruction>, out: &mut T) {
             .expect("must write");
     });
 }
-// fn disassemble<T: Write>(mut content_iter: Iter<u8>, out: &mut T) {
-//     writeln!(out, "bits 16\n").unwrap();
-//     loop {
-//         let Some(first) = content_iter.next() else {
-//             return;
-//         };
-//         let second = content_iter.next().unwrap();
-
-//         writeln!(
-//             out,
-//             "{}",
-//             if let Some(arimthmetic_inst) = ArithmeticInstruction::from(first, second) {
-//                 arimthmetic_inst.parse_and_format(first, second, &mut content_iter)
-//             } else if let Some(formatted_instr) = parse_and_format_jump(first, second) {
-//                 formatted_instr
-//             } else {
-//                 match first {
-//                     // 0b1100_0110..=0b1100_0111 => format!(
-//                     //     "mov {}",
-//                     //     Im2Rm::new(&mut content_iter, first, second, false).format_as_mov()
-//                     // ),
-//                     // 0b1000_1000..=0b1000_1011 => {
-//                     //     format!("mov {}", rm_to_reg(&mut content_iter, first, second))
-//                     // }
-//                     // 0b1010_0000..=0b1010_0011 => mov_acc(&mut content_iter, first, second),
-//                     // 0b1011_0000..=0b1011_1111 => {
-//                     //     mov_immediate_to_reg(&mut content_iter, first, second)
-//                     // }
-//                     _ => panic!("unknown operand: {:08b}", first),
-//                 }
-//             }
-//         )
-//         .unwrap()
-//     }
-// }
 
 fn read_file<T: Into<String>>(file_path: T) -> Vec<u8> {
     let Ok(content) = std::fs::read(file_path.into()) else {
@@ -445,8 +425,213 @@ fn read_file<T: Into<String>>(file_path: T) -> Vec<u8> {
 
     content
 }
+
+struct X86Memory {
+    // ax - 0
+    // bx - 1
+    // cx - 2
+    // dx - 3
+    // sp - 4
+    // bp - 5
+    // si - 6
+    // di - 7
+    arr: [u16; 4096],
+}
+
+static start_of_memory: usize = 8;
+
+fn to_index(reg: &Register) -> usize {
+    match reg {
+        Register::Ax => 0,
+        Register::Ah => 0,
+        Register::Al => 1,
+
+        Register::Bx => 1,
+        Register::Bh => 1 * 2,
+        Register::Bl => (1 * 2) + 1,
+
+        Register::Cx => 2,
+        Register::Ch => 2 * 2,
+        Register::Cl => (2 * 2) + 1,
+
+        Register::Dx => 3,
+        Register::Dh => 3 * 2,
+        Register::Dl => (3 * 2) + 1,
+
+        Register::Sp => 4,
+        Register::Bp => 5,
+        Register::Si => 6,
+        Register::Di => 7,
+    }
+}
+impl Register {
+    fn to_wide(&self) -> Register {
+        match self {
+            Register::Ah => Register::Ax,
+            Register::Al => Register::Ax,
+
+            Register::Bh => Register::Bx,
+            Register::Bl => Register::Bx,
+
+            Register::Ch => Register::Cx,
+            Register::Cl => Register::Cx,
+
+            Register::Dh => Register::Dx,
+            Register::Dl => Register::Dx,
+
+            _ => self.to_owned(),
+        }
+    }
+}
+
+trait SomeTakable<T> {
+    fn if_some_ref<F: FnOnce(&T)>(&self, mapper: F);
+    fn if_some_ref_mut<F: FnOnce(&mut T)>(&mut self, mapper: F);
+}
+impl<T> SomeTakable<T> for Option<T> {
+    fn if_some_ref<F: FnOnce(&T)>(&self, mapper: F) {
+        match self {
+            Some(it) => mapper(it),
+            None => {}
+        }
+    }
+    fn if_some_ref_mut<F: FnOnce(&mut T)>(&mut self, mapper: F) {
+        match self {
+            Some(it) => mapper(it),
+            None => {}
+        }
+    }
+}
+
+impl X86Memory {
+    fn as_mut_bytes(&mut self) -> &mut [u8] {
+        let len_in_bytes = std::mem::size_of_val(&self.arr); // 4096 * 2 = 8192
+        unsafe { std::slice::from_raw_parts_mut(self.arr.as_mut_ptr().cast::<u8>(), len_in_bytes) }
+    }
+    fn as_bytes(&self) -> &[u8] {
+        let len_in_bytes = std::mem::size_of_val(&self.arr); // 4096 * 2 = 8192
+        unsafe { std::slice::from_raw_parts(self.arr.as_ptr().cast::<u8>(), len_in_bytes) }
+    }
+
+    fn mov_register<T: Write>(&mut self, instruction: &Instruction, out_opt: &mut Option<&mut T>) {
+        let Operand::Register(to_reg) = &instruction.left_operand else {
+            panic!("unexpected instruction {}", instruction.format());
+        };
+        let operand = instruction.right_operand;
+        let flags = instruction.flags;
+
+        let is_wide = to_reg.is_wide();
+        assert_eq!(flags.contains(InstructionFlags::Wide), is_wide);
+        out_opt.if_some_ref_mut(|out| {
+            let wide_reg = to_reg.to_wide();
+            let prev_value = self.arr[to_index(&wide_reg)];
+
+            out.write(
+                format!(
+                    "{} ; {} {:#06x} -> ",
+                    instruction.format(),
+                    wide_reg.format(),
+                    prev_value
+                )
+                .as_bytes(),
+            )
+            .expect("is ok");
+        });
+        if is_wide {
+            match &operand {
+                Operand::Register(from_reg) => {
+                    assert!(from_reg.is_wide());
+
+                    self.arr[to_index(to_reg)] = self.arr[to_index(from_reg)];
+                }
+                Operand::Immediate(data) => {
+                    self.arr[to_index(to_reg)] = *data as u16;
+                }
+                _ => panic!("unexpected operand {}", operand.format()),
+            }
+        } else {
+            match &operand {
+                Operand::Register(from_reg) => {
+                    assert!(from_reg.is_wide());
+                    self.as_mut_bytes()[to_index(to_reg)] = self.as_bytes()[to_index(from_reg)];
+                }
+                Operand::Immediate(data) => {
+                    self.as_mut_bytes()[to_index(to_reg)] = *data as u8;
+                }
+                _ => panic!("unexpected operand {}", operand.format()),
+            }
+        }
+
+        out_opt.if_some_ref_mut(|out| {
+            let wide_reg = to_reg.to_wide();
+            let next_value = self.arr[to_index(&wide_reg)];
+
+            out.write(format!("{:#06x}\n", next_value).as_bytes())
+                .expect("is ok");
+        });
+    }
+
+    fn print_registers<T: Write>(&self, out: &mut T) {
+        let registers = [
+            Register::Ax,
+            Register::Bx,
+            Register::Cx,
+            Register::Dx,
+            Register::Sp,
+            Register::Bp,
+            Register::Si,
+            Register::Di,
+        ];
+
+        registers.iter().for_each(|reg| {
+            let value = self.arr[to_index(reg)];
+
+            writeln!(out, "{} {:#06x} ({})", reg.format(), value, value).unwrap();
+        });
+    }
+}
+
+fn execute<T: Write>(instructions: Vec<Instruction>, mut out: Option<&mut T>) {
+    let mut memory = X86Memory {
+        arr: core::array::from_fn(|i| 0u16),
+    };
+    instructions.iter().for_each(|instr| match instr.op_code {
+        OpCode::Mov => match instr.left_operand {
+            Operand::Register(_) => {
+                memory.mov_register(instr, &mut out);
+            }
+            _ => {
+                panic!("unsupported operand for mov {}", instr.format());
+            }
+        },
+        _ => panic!("unsupported OpCode {}", instr.op_code.format()),
+    });
+    (&mut out).if_some_ref_mut(|out| {
+        writeln!(out, "\nFinal registers: ").unwrap();
+        memory.print_registers(out);
+    });
+}
+
+enum CliMode {
+    Disasm,
+    Exec,
+}
+
 fn main() {
-    let Some(path) = std::env::args().skip(1).next() else {
+    let mut args = std::env::args().skip(1);
+    let mode = match (args.next()) {
+        Some(str) if str == "disasm" => CliMode::Disasm,
+        Some(str) if str == "exec" => CliMode::Exec,
+        Some(str) => {
+            std::println!("Unknown mode: {}", str);
+            return;
+        }
+        _ => {
+            std::println!("Please at least two args");
+            return;
+        }
+    };
+    let Some(path) = args.next() else {
         std::println!("Please provide assembly file path");
         return;
     };
@@ -454,7 +639,15 @@ fn main() {
     let content = read_file(path);
     let content_iter = content.iter();
     let instrucitons = process_binary(content_iter);
-    write_instructions(instrucitons, &mut std::io::stdout().lock());
+    let mut stdout = &mut std::io::stdout().lock();
+    match mode {
+        CliMode::Disasm => {
+            write_instructions(instrucitons, &mut std::io::stdout().lock());
+        }
+        CliMode::Exec => {
+            execute(instrucitons, Some(stdout));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -463,26 +656,31 @@ mod tests {
 
     use crate::{process_binary, read_file, write_instructions};
 
+    fn compile_asm_if_not(path: &str, force_recompile: bool) {
+        if force_recompile || !Path::new(path).exists() {
+            let asm_path = format!("{}.asm", path);
+            assert!(Path::new(&asm_path).exists());
+
+            Command::new("nasm").args([asm_path]).output().unwrap();
+            assert!(Path::new(&path).exists());
+        }
+    }
+
     #[test]
-    fn test_files() {
+    fn test_parser() {
         let files = [
             "./input/listing_0037_single_register_mov",
             "./input/listing_0038_many_register_mov",
             "./input/listing_0039_more_movs",
             "./input/listing_0040_challenge_movs",
             "./input/listing_0041_add_sub_cmp_jnz",
+            "./input/listing_0043_immediate_movs",
+            "./input/listing_0044_register_movs",
         ];
+        let force_recompilation = std::env::var("RECOMPILE").map_or(false, |it| it == "true");
 
         for file_path in files {
-            if std::env::var("RECOMPILE").map_or(false, |it| it == "true")
-                || !Path::new(file_path).exists()
-            {
-                let asm_path = format!("{}.asm", file_path);
-                assert!(Path::new(&asm_path).exists());
-
-                Command::new("nasm").args([asm_path]).output().unwrap();
-                assert!(Path::new(&file_path).exists());
-            }
+            compile_asm_if_not(file_path, force_recompilation);
             let file = read_file(file_path);
             let mut res: Vec<u8> = Vec::new();
             println!("checking '{}'", file_path);

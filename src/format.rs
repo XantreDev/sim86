@@ -19,14 +19,13 @@ impl Formattable for Register {
             Register::Cx => "cx",
             Register::Cl => "cl",
             Register::Ch => "ch",
-            Register::Cs => "cs",
-
+            // Register::Cs => "cs",
             Register::Dx => "dx",
             Register::Dl => "dl",
             Register::Dh => "dh",
             Register::Di => "di",
 
-            Register::Ip => "ip",
+            // Register::Ip => "ip",
             Register::Si => "si",
             Register::Sp => "sp",
         }
@@ -113,8 +112,8 @@ impl Formattable for Operand {
 impl Operand {
     fn is_eac(&self) -> bool {
         match self {
-            Operand::Address(_,_,_) => true,
-            _ => false
+            Operand::Address(_, _, _) => true,
+            _ => false,
         }
     }
 }
@@ -132,8 +131,16 @@ impl Formattable for Instruction {
             self.op_code.format(),
             self.left_operand.format(),
             match (self.left_operand, self.right_operand) {
-               (Operand::Address(_,_,_),Operand::Immediate(_)) => format!("{} {}", if self.flags.contains(InstructionFlags::Wide) { "word" } else {"byte"}, self.right_operand.format()),
-               _ => self.right_operand.format()
+                (Operand::Address(_, _, _), Operand::Immediate(_)) => format!(
+                    "{} {}",
+                    if self.flags.contains(InstructionFlags::Wide) {
+                        "word"
+                    } else {
+                        "byte"
+                    },
+                    self.right_operand.format()
+                ),
+                _ => self.right_operand.format(),
             }
         )
     }
