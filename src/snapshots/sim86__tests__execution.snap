@@ -1,0 +1,23 @@
+---
+source: src/main.rs
+expression: "str::from_utf8(res.as_slice()).unwrap()"
+snapshot_kind: text
+---
+mov ax, 1 ; ax 0x0000 -> 0x0001
+mov bx, 2 ; bx 0x0000 -> 0x0002
+mov cx, 3 ; cx 0x0000 -> 0x0003
+mov dx, 4 ; dx 0x0000 -> 0x0004
+mov sp, 5 ; sp 0x0000 -> 0x0005
+mov bp, 6 ; bp 0x0000 -> 0x0006
+mov si, 7 ; si 0x0000 -> 0x0007
+mov di, 8 ; di 0x0000 -> 0x0008
+
+Final registers: 
+ax 0x0001 (1)
+bx 0x0002 (2)
+cx 0x0003 (3)
+dx 0x0004 (4)
+sp 0x0005 (5)
+bp 0x0006 (6)
+si 0x0007 (7)
+di 0x0008 (8)

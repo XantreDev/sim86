@@ -1,0 +1,27 @@
+---
+source: src/main.rs
+assertion_line: 725
+expression: "str::from_utf8(res.as_slice()).unwrap()"
+---
+mov ax, 1 ; ax 0x0000 -> 0x0001
+mov bx, 2 ; bx 0x0000 -> 0x0002
+mov cx, 3 ; cx 0x0000 -> 0x0003
+mov dx, 4 ; dx 0x0000 -> 0x0004
+mov sp, ax ; sp 0x0000 -> 0x0001
+mov bp, bx ; bp 0x0000 -> 0x0002
+mov si, cx ; si 0x0000 -> 0x0003
+mov di, dx ; di 0x0000 -> 0x0004
+mov dx, sp ; dx 0x0004 -> 0x0001
+mov cx, bp ; cx 0x0003 -> 0x0002
+mov bx, si ; bx 0x0002 -> 0x0003
+mov ax, di ; ax 0x0001 -> 0x0004
+
+Final registers: 
+ax 0x0004 (4)
+bx 0x0003 (3)
+cx 0x0002 (2)
+dx 0x0001 (1)
+sp 0x0001 (1)
+bp 0x0002 (2)
+si 0x0003 (3)
+di 0x0004 (4)

@@ -593,7 +593,7 @@ impl X86Memory {
 
 fn execute<T: Write>(instructions: Vec<Instruction>, mut out: Option<&mut T>) {
     let mut memory = X86Memory {
-        arr: core::array::from_fn(|i| 0u16),
+        arr: core::array::from_fn(|_| 0u16),
     };
     instructions.iter().for_each(|instr| match instr.op_code {
         OpCode::Mov => match instr.left_operand {
@@ -652,9 +652,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use core::str;
     use std::{fs::create_dir, fs::File, io::Write, path::Path, process::Command};
 
-    use crate::{process_binary, read_file, write_instructions};
+    use crate::{execute, process_binary, read_file, write_instructions};
 
     fn compile_asm_if_not(path: &str, force_recompile: bool) {
         if force_recompile || !Path::new(path).exists() {
@@ -703,6 +704,25 @@ mod tests {
 
             let nasm_file = read_file("./.test/test".to_string());
             assert!(nasm_file == file);
+        }
+    }
+
+    #[test]
+    fn test_execution() {
+        let files = [
+            "./input/listing_0043_immediate_movs",
+            "./input/listing_0044_register_movs",
+        ];
+        let force_recompilation = std::env::var("RECOMPILE").map_or(false, |it| it == "true");
+
+        for file_path in files {
+            compile_asm_if_not(file_path, force_recompilation);
+            let file = read_file(file_path);
+            let mut res: Vec<u8> = Vec::new();
+            println!("evaluating '{}'", file_path);
+
+            execute(process_binary(file.iter()), Some(&mut res));
+            insta::assert_snapshot!(str::from_utf8(res.as_slice()).unwrap());
         }
     }
 }
