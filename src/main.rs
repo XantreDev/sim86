@@ -444,25 +444,31 @@ fn to_index(reg: &Register) -> usize {
     match reg {
         Register::Ax => 0,
         Register::Ah => 0,
-        Register::Al => 1,
+        Register::Al => 0,
 
         Register::Bx => 1,
-        Register::Bh => 1 * 2,
-        Register::Bl => (1 * 2) + 1,
+        Register::Bh => 1,
+        Register::Bl => 1,
 
         Register::Cx => 2,
-        Register::Ch => 2 * 2,
-        Register::Cl => (2 * 2) + 1,
+        Register::Ch => 2,
+        Register::Cl => 2,
 
         Register::Dx => 3,
-        Register::Dh => 3 * 2,
-        Register::Dl => (3 * 2) + 1,
+        Register::Dh => 3,
+        Register::Dl => 3,
 
         Register::Sp => 4,
         Register::Bp => 5,
         Register::Si => 6,
         Register::Di => 7,
     }
+}
+
+enum RegType {
+    Low,
+    High,
+    Wide,
 }
 impl Register {
     fn to_wide(&self) -> Register {
@@ -480,6 +486,51 @@ impl Register {
             Register::Dl => Register::Dx,
 
             _ => self.to_owned(),
+        }
+    }
+    fn reg_type(&self) -> RegType {
+        match self {
+            Register::Ah => RegType::High,
+            Register::Bh => RegType::High,
+            Register::Ch => RegType::High,
+            Register::Dh => RegType::High,
+
+            Register::Al => RegType::Low,
+            Register::Bl => RegType::Low,
+            Register::Cl => RegType::Low,
+            Register::Dl => RegType::Low,
+
+            _ => RegType::Wide,
+        }
+    }
+    fn bit_mask(&self) -> u16 {
+        match self {
+            Register::Ah => 0xFF00,
+            Register::Bh => 0xFF00,
+            Register::Ch => 0xFF00,
+            Register::Dh => 0xFF00,
+
+            Register::Al => 0x00FF,
+            Register::Bl => 0x00FF,
+            Register::Cl => 0x00FF,
+            Register::Dl => 0x00FF,
+
+            _ => 0xFFFF,
+        }
+    }
+    fn bit_shift(&self) -> u16 {
+        match self {
+            Register::Ah => 8,
+            Register::Bh => 8,
+            Register::Ch => 8,
+            Register::Dh => 8,
+
+            Register::Al => 0,
+            Register::Bl => 0,
+            Register::Cl => 0,
+            Register::Dl => 0,
+
+            _ => 0,
         }
     }
 }
@@ -504,14 +555,13 @@ impl<T> SomeTakable<T> for Option<T> {
 }
 
 impl X86Memory {
-    fn as_mut_bytes(&mut self) -> &mut [u8] {
-        let len_in_bytes = std::mem::size_of_val(&self.arr); // 4096 * 2 = 8192
-        unsafe { std::slice::from_raw_parts_mut(self.arr.as_mut_ptr().cast::<u8>(), len_in_bytes) }
-    }
-    fn as_bytes(&self) -> &[u8] {
-        let len_in_bytes = std::mem::size_of_val(&self.arr); // 4096 * 2 = 8192
-        unsafe { std::slice::from_raw_parts(self.arr.as_ptr().cast::<u8>(), len_in_bytes) }
-    }
+    // fn get_part(reg_type: &RegType, prev_vaue: &u16, value: &u16) -> u16 {
+    //     match reg_type {
+    //         RegType::Wide => *value,
+    //         RegType::Low => (value & 0xFF00) | (value & 0x00FF),
+    //         RegType::High => (value & 0x00FF) | ((value & 0x00FF) << 8),
+    //     }
+    // }
 
     fn mov_register<T: Write>(&mut self, instruction: &Instruction, out_opt: &mut Option<&mut T>) {
         let Operand::Register(to_reg) = &instruction.left_operand else {
@@ -550,13 +600,17 @@ impl X86Memory {
                 _ => panic!("unexpected operand {}", operand.format()),
             }
         } else {
+            let current = self.arr[to_index(to_reg)];
             match &operand {
                 Operand::Register(from_reg) => {
-                    assert!(from_reg.is_wide());
-                    self.as_mut_bytes()[to_index(to_reg)] = self.as_bytes()[to_index(from_reg)];
+                    assert!(!from_reg.is_wide());
+
+                    self.arr[to_index(to_reg)] = (current & to_reg.bit_mask().reverse_bits())
+                        | (self.arr[to_index(from_reg)] & &from_reg.bit_mask());
                 }
                 Operand::Immediate(data) => {
-                    self.as_mut_bytes()[to_index(to_reg)] = *data as u8;
+                    self.arr[to_index(to_reg)] = (current & to_reg.bit_mask().reverse_bits())
+                        | ((*data as u16) << to_reg.bit_shift());
                 }
                 _ => panic!("unexpected operand {}", operand.format()),
             }
@@ -639,6 +693,12 @@ fn main() {
     let content = read_file(path);
     let content_iter = content.iter();
     let instrucitons = process_binary(content_iter);
+    #[cfg(target_endian = "big")]
+    println!("This is a BigEndian system");
+
+    #[cfg(target_endian = "little")]
+    println!("This is a Little endian system");
+
     let mut stdout = &mut std::io::stdout().lock();
     match mode {
         CliMode::Disasm => {
@@ -677,6 +737,7 @@ mod tests {
             "./input/listing_0041_add_sub_cmp_jnz",
             "./input/listing_0043_immediate_movs",
             "./input/listing_0044_register_movs",
+            "./input/listing_0044_register_movs_extended",
         ];
         let force_recompilation = std::env::var("RECOMPILE").map_or(false, |it| it == "true");
 
@@ -712,6 +773,7 @@ mod tests {
         let files = [
             "./input/listing_0043_immediate_movs",
             "./input/listing_0044_register_movs",
+            "./input/listing_0044_register_movs_extended",
         ];
         let force_recompilation = std::env::var("RECOMPILE").map_or(false, |it| it == "true");
 

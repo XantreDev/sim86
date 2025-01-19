@@ -1,6 +1,6 @@
 ---
 source: src/main.rs
-assertion_line: 725
+assertion_line: 787
 expression: "str::from_utf8(res.as_slice()).unwrap()"
 ---
 mov ax, 1 ; ax 0x0000 -> 0x0001
