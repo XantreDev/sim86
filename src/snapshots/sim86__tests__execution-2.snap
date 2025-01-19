@@ -1,7 +1,7 @@
 ---
 source: src/main.rs
-assertion_line: 787
 expression: "str::from_utf8(res.as_slice()).unwrap()"
+snapshot_kind: text
 ---
 mov ax, 1 ; ax 0x0000 -> 0x0001
 mov bx, 2 ; bx 0x0000 -> 0x0002

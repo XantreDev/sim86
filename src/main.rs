@@ -427,51 +427,29 @@ fn read_file<T: Into<String>>(file_path: T) -> Vec<u8> {
 }
 
 struct X86Memory {
-    // ax - 0
-    // bx - 1
-    // cx - 2
-    // dx - 3
-    // sp - 4
-    // bp - 5
-    // si - 6
-    // di - 7
-    arr: [u16; 4096],
+    // most of a X86 and ARM processors are little endian, so I will use
+    // little endian as encoding of word size registers
+    // ax - (0, 2)
+    // bx - (2, 4)
+    // cx - (4, 6)
+    // dx - (6, 8)
+    // sp - (8 - 10)
+    // bp - (10 - 12)
+    // si - (12 - 14)
+    // di - (14 - 16)
+    arr: [u8; 8192],
 }
 
 static start_of_memory: usize = 8;
 
-fn to_index(reg: &Register) -> usize {
-    match reg {
-        Register::Ax => 0,
-        Register::Ah => 0,
-        Register::Al => 0,
-
-        Register::Bx => 1,
-        Register::Bh => 1,
-        Register::Bl => 1,
-
-        Register::Cx => 2,
-        Register::Ch => 2,
-        Register::Cl => 2,
-
-        Register::Dx => 3,
-        Register::Dh => 3,
-        Register::Dl => 3,
-
-        Register::Sp => 4,
-        Register::Bp => 5,
-        Register::Si => 6,
-        Register::Di => 7,
-    }
-}
-
+#[derive(PartialEq, Eq)]
 enum RegType {
     Low,
     High,
-    Wide,
+    Word,
 }
 impl Register {
-    fn to_wide(&self) -> Register {
+    fn to_word(&self) -> Register {
         match self {
             Register::Ah => Register::Ax,
             Register::Al => Register::Ax,
@@ -500,7 +478,7 @@ impl Register {
             Register::Cl => RegType::Low,
             Register::Dl => RegType::Low,
 
-            _ => RegType::Wide,
+            _ => RegType::Word,
         }
     }
     fn bit_mask(&self) -> u16 {
@@ -533,6 +511,57 @@ impl Register {
             _ => 0,
         }
     }
+
+    fn to_word_index(&self) -> usize {
+        match self {
+            Register::Ax => 0,
+            Register::Ah => 0,
+            Register::Al => 0,
+
+            Register::Bx => 1,
+            Register::Bh => 1,
+            Register::Bl => 1,
+
+            Register::Cx => 2,
+            Register::Ch => 2,
+            Register::Cl => 2,
+
+            Register::Dx => 3,
+            Register::Dh => 3,
+            Register::Dl => 3,
+
+            Register::Sp => 4,
+            Register::Bp => 5,
+            Register::Si => 6,
+            Register::Di => 7,
+        }
+    }
+
+    // little endian encoding
+    fn to_byte_index(&self) -> usize {
+        match self {
+            Register::Ax => 0,
+            Register::Ah => 1,
+            Register::Al => 0,
+
+            Register::Bx => 2,
+            Register::Bh => 3,
+            Register::Bl => 2,
+
+            Register::Cx => 4,
+            Register::Ch => 5,
+            Register::Cl => 4,
+
+            Register::Dx => 6,
+            Register::Dh => 7,
+            Register::Dl => 6,
+
+            Register::Sp => 8,
+            Register::Bp => 10,
+            Register::Si => 12,
+            Register::Di => 14,
+        }
+    }
 }
 
 trait SomeTakable<T> {
@@ -554,14 +583,47 @@ impl<T> SomeTakable<T> for Option<T> {
     }
 }
 
+trait AsU16 {
+    fn as_u16_ref(&self) -> &[u16];
+    fn as_u16_ref_mut(&mut self) -> &mut [u16];
+}
+
+impl AsU16 for [u8] {
+    fn as_u16_ref(&self) -> &[u16] {
+        let size = size_of_val(self);
+
+        unsafe { std::slice::from_raw_parts(self.as_ptr().cast::<u16>(), size) }
+    }
+
+    fn as_u16_ref_mut(&mut self) -> &mut [u16] {
+        let size = size_of_val(self);
+
+        unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr().cast::<u16>(), size) }
+    }
+}
+
 impl X86Memory {
-    // fn get_part(reg_type: &RegType, prev_vaue: &u16, value: &u16) -> u16 {
-    //     match reg_type {
-    //         RegType::Wide => *value,
-    //         RegType::Low => (value & 0xFF00) | (value & 0x00FF),
-    //         RegType::High => (value & 0x00FF) | ((value & 0x00FF) << 8),
-    //     }
-    // }
+    fn get_word_value(&self, reg: &Register) -> u16 {
+        #[cfg(debug_assertions)]
+        assert!(reg.reg_type() == RegType::Word);
+
+        if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
+            self.arr.as_u16_ref()[reg.to_word_index()]
+        } else {
+            (self.arr[reg.to_byte_index()] as u16) | (self.arr[reg.to_byte_index() + 1] as u16) << 8
+        }
+    }
+    fn write_word_value(&mut self, reg: &Register, value: u16) {
+        #[cfg(debug_assertions)]
+        assert!(reg.reg_type() == RegType::Word);
+
+        if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
+            self.arr.as_u16_ref_mut()[reg.to_word_index()] = value;
+        } else {
+            self.arr[reg.to_byte_index()] = (value & 0x00FF) as u8;
+            self.arr[reg.to_byte_index() + 1] = ((value & 0xFF00) >> 8) as u8;
+        }
+    }
 
     fn mov_register<T: Write>(&mut self, instruction: &Instruction, out_opt: &mut Option<&mut T>) {
         let Operand::Register(to_reg) = &instruction.left_operand else {
@@ -573,52 +635,52 @@ impl X86Memory {
         let is_wide = to_reg.is_wide();
         assert_eq!(flags.contains(InstructionFlags::Wide), is_wide);
         out_opt.if_some_ref_mut(|out| {
-            let wide_reg = to_reg.to_wide();
-            let prev_value = self.arr[to_index(&wide_reg)];
+            let word_reg = to_reg.to_word();
+            let prev_value = self.get_word_value(&word_reg);
 
             out.write(
                 format!(
                     "{} ; {} {:#06x} -> ",
                     instruction.format(),
-                    wide_reg.format(),
+                    word_reg.format(),
                     prev_value
                 )
                 .as_bytes(),
             )
             .expect("is ok");
         });
+
         if is_wide {
             match &operand {
                 Operand::Register(from_reg) => {
-                    assert!(from_reg.is_wide());
-
-                    self.arr[to_index(to_reg)] = self.arr[to_index(from_reg)];
+                    self.write_word_value(to_reg, self.get_word_value(from_reg));
                 }
                 Operand::Immediate(data) => {
-                    self.arr[to_index(to_reg)] = *data as u16;
+                    self.write_word_value(to_reg, *data as u16);
                 }
                 _ => panic!("unexpected operand {}", operand.format()),
             }
         } else {
-            let current = self.arr[to_index(to_reg)];
             match &operand {
                 Operand::Register(from_reg) => {
+                    #[cfg(debug_assertions)]
                     assert!(!from_reg.is_wide());
 
-                    self.arr[to_index(to_reg)] = (current & to_reg.bit_mask().reverse_bits())
-                        | (self.arr[to_index(from_reg)] & &from_reg.bit_mask());
+                    self.arr[to_reg.to_byte_index()] = self.arr[from_reg.to_byte_index()];
                 }
                 Operand::Immediate(data) => {
-                    self.arr[to_index(to_reg)] = (current & to_reg.bit_mask().reverse_bits())
-                        | ((*data as u16) << to_reg.bit_shift());
+                    #[cfg(debug_assertions)]
+                    assert!(*data <= 0x00FFi16);
+
+                    self.arr[to_reg.to_byte_index()] = (*data) as u8;
                 }
                 _ => panic!("unexpected operand {}", operand.format()),
             }
         }
 
         out_opt.if_some_ref_mut(|out| {
-            let wide_reg = to_reg.to_wide();
-            let next_value = self.arr[to_index(&wide_reg)];
+            let word_reg = to_reg.to_word();
+            let next_value = self.get_word_value(&word_reg);
 
             out.write(format!("{:#06x}\n", next_value).as_bytes())
                 .expect("is ok");
@@ -638,7 +700,7 @@ impl X86Memory {
         ];
 
         registers.iter().for_each(|reg| {
-            let value = self.arr[to_index(reg)];
+            let value = self.get_word_value(reg);
 
             writeln!(out, "{} {:#06x} ({})", reg.format(), value, value).unwrap();
         });
@@ -647,7 +709,7 @@ impl X86Memory {
 
 fn execute<T: Write>(instructions: Vec<Instruction>, mut out: Option<&mut T>) {
     let mut memory = X86Memory {
-        arr: core::array::from_fn(|_| 0u16),
+        arr: core::array::from_fn(|_| 0u8),
     };
     instructions.iter().for_each(|instr| match instr.op_code {
         OpCode::Mov => match instr.left_operand {

@@ -1,24 +1,24 @@
 ---
 source: src/main.rs
-assertion_line: 728
 expression: "str::from_utf8(res.as_slice()).unwrap()"
+snapshot_kind: text
 ---
 mov ax, 8738 ; ax 0x0000 -> 0x2222
 mov bx, 17476 ; bx 0x0000 -> 0x4444
 mov cx, 26214 ; cx 0x0000 -> 0x6666
 mov dx, -30584 ; dx 0x0000 -> 0x8888
-mov al, 17 ; ax 0x2222 -> 0x1122
-mov bh, 51 ; bx 0x4444 -> 0x4433
-mov cl, 85 ; cx 0x6666 -> 0x5566
-mov dh, 119 ; dx 0x8888 -> 0x8877
-mov ah, bl ; ax 0x1122 -> 0x1144
-mov cl, dh ; cx 0x5566 -> 0x7766
+mov al, 17 ; ax 0x2222 -> 0x2211
+mov bh, 51 ; bx 0x4444 -> 0x3344
+mov cl, 85 ; cx 0x6666 -> 0x6655
+mov dh, 119 ; dx 0x8888 -> 0x7788
+mov ah, bl ; ax 0x2211 -> 0x4411
+mov cl, dh ; cx 0x6655 -> 0x6677
 
 Final registers: 
-ax 0x1144 (4420)
-bx 0x4433 (17459)
-cx 0x7766 (30566)
-dx 0x8877 (34935)
+ax 0x4411 (17425)
+bx 0x3344 (13124)
+cx 0x6677 (26231)
+dx 0x7788 (30600)
 sp 0x0000 (0)
 bp 0x0000 (0)
 si 0x0000 (0)
