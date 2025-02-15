@@ -426,306 +426,345 @@ fn read_file<T: Into<String>>(file_path: T) -> Vec<u8> {
     content
 }
 
-struct X86Memory {
-    // most of a X86 and ARM processors are little endian, so I will use
-    // little endian as encoding of word size registers
-    // ax - (0, 2)
-    // bx - (2, 4)
-    // cx - (4, 6)
-    // dx - (6, 8)
-    // sp - (8 - 10)
-    // bp - (10 - 12)
-    // si - (12 - 14)
-    // di - (14 - 16)
-    arr: [u8; 8192],
-}
-
-static start_of_memory: usize = 8;
-
-#[derive(PartialEq, Eq)]
-enum RegType {
-    Low,
-    High,
-    Word,
-}
-impl Register {
-    fn to_word(&self) -> Register {
-        match self {
-            Register::Ah => Register::Ax,
-            Register::Al => Register::Ax,
-
-            Register::Bh => Register::Bx,
-            Register::Bl => Register::Bx,
-
-            Register::Ch => Register::Cx,
-            Register::Cl => Register::Cx,
-
-            Register::Dh => Register::Dx,
-            Register::Dl => Register::Dx,
-
-            _ => self.to_owned(),
-        }
-    }
-    fn reg_type(&self) -> RegType {
-        match self {
-            Register::Ah => RegType::High,
-            Register::Bh => RegType::High,
-            Register::Ch => RegType::High,
-            Register::Dh => RegType::High,
-
-            Register::Al => RegType::Low,
-            Register::Bl => RegType::Low,
-            Register::Cl => RegType::Low,
-            Register::Dl => RegType::Low,
-
-            _ => RegType::Word,
-        }
-    }
-    fn bit_mask(&self) -> u16 {
-        match self {
-            Register::Ah => 0xFF00,
-            Register::Bh => 0xFF00,
-            Register::Ch => 0xFF00,
-            Register::Dh => 0xFF00,
-
-            Register::Al => 0x00FF,
-            Register::Bl => 0x00FF,
-            Register::Cl => 0x00FF,
-            Register::Dl => 0x00FF,
-
-            _ => 0xFFFF,
-        }
-    }
-    fn bit_shift(&self) -> u16 {
-        match self {
-            Register::Ah => 8,
-            Register::Bh => 8,
-            Register::Ch => 8,
-            Register::Dh => 8,
-
-            Register::Al => 0,
-            Register::Bl => 0,
-            Register::Cl => 0,
-            Register::Dl => 0,
-
-            _ => 0,
-        }
-    }
-
-    fn to_word_index(&self) -> usize {
-        match self {
-            Register::Ax => 0,
-            Register::Ah => 0,
-            Register::Al => 0,
-
-            Register::Bx => 1,
-            Register::Bh => 1,
-            Register::Bl => 1,
-
-            Register::Cx => 2,
-            Register::Ch => 2,
-            Register::Cl => 2,
-
-            Register::Dx => 3,
-            Register::Dh => 3,
-            Register::Dl => 3,
-
-            Register::Sp => 4,
-            Register::Bp => 5,
-            Register::Si => 6,
-            Register::Di => 7,
-        }
-    }
-
-    // little endian encoding
-    fn to_byte_index(&self) -> usize {
-        match self {
-            Register::Ax => 0,
-            Register::Ah => 1,
-            Register::Al => 0,
-
-            Register::Bx => 2,
-            Register::Bh => 3,
-            Register::Bl => 2,
-
-            Register::Cx => 4,
-            Register::Ch => 5,
-            Register::Cl => 4,
-
-            Register::Dx => 6,
-            Register::Dh => 7,
-            Register::Dl => 6,
-
-            Register::Sp => 8,
-            Register::Bp => 10,
-            Register::Si => 12,
-            Register::Di => 14,
-        }
-    }
-}
-
-trait SomeTakable<T> {
-    fn if_some_ref<F: FnOnce(&T)>(&self, mapper: F);
-    fn if_some_ref_mut<F: FnOnce(&mut T)>(&mut self, mapper: F);
-}
-impl<T> SomeTakable<T> for Option<T> {
-    fn if_some_ref<F: FnOnce(&T)>(&self, mapper: F) {
-        match self {
-            Some(it) => mapper(it),
-            None => {}
-        }
-    }
-    fn if_some_ref_mut<F: FnOnce(&mut T)>(&mut self, mapper: F) {
-        match self {
-            Some(it) => mapper(it),
-            None => {}
-        }
-    }
-}
-
-trait AsU16 {
-    fn as_u16_ref(&self) -> &[u16];
-    fn as_u16_ref_mut(&mut self) -> &mut [u16];
-}
-
-impl AsU16 for [u8] {
-    fn as_u16_ref(&self) -> &[u16] {
-        let size = size_of_val(self);
-
-        unsafe { std::slice::from_raw_parts(self.as_ptr().cast::<u16>(), size) }
-    }
-
-    fn as_u16_ref_mut(&mut self) -> &mut [u16] {
-        let size = size_of_val(self);
-
-        unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr().cast::<u16>(), size) }
-    }
-}
-
-impl X86Memory {
-    fn get_word_value(&self, reg: &Register) -> u16 {
-        #[cfg(debug_assertions)]
-        assert!(reg.reg_type() == RegType::Word);
-
-        if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
-            self.arr.as_u16_ref()[reg.to_word_index()]
-        } else {
-            (self.arr[reg.to_byte_index()] as u16) | (self.arr[reg.to_byte_index() + 1] as u16) << 8
-        }
-    }
-    fn write_word_value(&mut self, reg: &Register, value: u16) {
-        #[cfg(debug_assertions)]
-        assert!(reg.reg_type() == RegType::Word);
-
-        if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
-            self.arr.as_u16_ref_mut()[reg.to_word_index()] = value;
-        } else {
-            self.arr[reg.to_byte_index()] = (value & 0x00FF) as u8;
-            self.arr[reg.to_byte_index() + 1] = ((value & 0xFF00) >> 8) as u8;
-        }
-    }
-
-    fn mov_register<T: Write>(&mut self, instruction: &Instruction, out_opt: &mut Option<&mut T>) {
-        let Operand::Register(to_reg) = &instruction.left_operand else {
-            panic!("unexpected instruction {}", instruction.format());
-        };
-        let operand = instruction.right_operand;
-        let flags = instruction.flags;
-
-        let is_wide = to_reg.is_wide();
-        assert_eq!(flags.contains(InstructionFlags::Wide), is_wide);
-        out_opt.if_some_ref_mut(|out| {
-            let word_reg = to_reg.to_word();
-            let prev_value = self.get_word_value(&word_reg);
-
-            out.write(
-                format!(
-                    "{} ; {} {:#06x} -> ",
-                    instruction.format(),
-                    word_reg.format(),
-                    prev_value
-                )
-                .as_bytes(),
-            )
-            .expect("is ok");
-        });
-
-        if is_wide {
-            match &operand {
-                Operand::Register(from_reg) => {
-                    self.write_word_value(to_reg, self.get_word_value(from_reg));
-                }
-                Operand::Immediate(data) => {
-                    self.write_word_value(to_reg, *data as u16);
-                }
-                _ => panic!("unexpected operand {}", operand.format()),
-            }
-        } else {
-            match &operand {
-                Operand::Register(from_reg) => {
-                    #[cfg(debug_assertions)]
-                    assert!(!from_reg.is_wide());
-
-                    self.arr[to_reg.to_byte_index()] = self.arr[from_reg.to_byte_index()];
-                }
-                Operand::Immediate(data) => {
-                    #[cfg(debug_assertions)]
-                    assert!(*data <= 0x00FFi16);
-
-                    self.arr[to_reg.to_byte_index()] = (*data) as u8;
-                }
-                _ => panic!("unexpected operand {}", operand.format()),
-            }
-        }
-
-        out_opt.if_some_ref_mut(|out| {
-            let word_reg = to_reg.to_word();
-            let next_value = self.get_word_value(&word_reg);
-
-            out.write(format!("{:#06x}\n", next_value).as_bytes())
-                .expect("is ok");
-        });
-    }
-
-    fn print_registers<T: Write>(&self, out: &mut T) {
-        let registers = [
-            Register::Ax,
-            Register::Bx,
-            Register::Cx,
-            Register::Dx,
-            Register::Sp,
-            Register::Bp,
-            Register::Si,
-            Register::Di,
-        ];
-
-        registers.iter().for_each(|reg| {
-            let value = self.get_word_value(reg);
-
-            writeln!(out, "{} {:#06x} ({})", reg.format(), value, value).unwrap();
-        });
-    }
-}
-
-fn execute<T: Write>(instructions: Vec<Instruction>, mut out: Option<&mut T>) {
-    let mut memory = X86Memory {
-        arr: core::array::from_fn(|_| 0u8),
+mod simulator {
+    use crate::{
+        format::Formattable, Instruction, InstructionFlags, IsWide, OpCode, Operand, Register,
     };
-    instructions.iter().for_each(|instr| match instr.op_code {
-        OpCode::Mov => match instr.left_operand {
-            Operand::Register(_) => {
-                memory.mov_register(instr, &mut out);
+    use bitflags::bitflags;
+    use std::{io::Write, slice::Iter};
+
+    struct X86Memory {
+        // most of a X86 and ARM processors are little endian, so I will use
+        // little endian as encoding of word size registers
+        // ax - (0, 2)
+        // bx - (2, 4)
+        // cx - (4, 6)
+        // dx - (6, 8)
+        // sp - (8 - 10)
+        // bp - (10 - 12)
+        // si - (12 - 14)
+        // di - (14 - 16)
+        arr: [u8; 8192],
+
+        flags: Flags,
+    }
+    static start_of_memory: usize = 8;
+
+    bitflags! {
+        #[derive(PartialEq, Eq, Clone, Copy)]
+        pub struct Flags: u16 {
+            // if unsigned overflow happend
+            const Carry = 0b0000_0000_0000_0000_0001;
+            // checks whenever there is an even amount of 1 bits in the result (checks only 8 low bits)
+            const Parity = 0b0000_0000_0000_0000_0100;
+            // check for unsigned overflow in low nibble (4 bits)
+            const AuxiliaryCarry = 0b0000_0000_0001_0000;
+            // if result is zero -> sets to 1
+            const Zero = 0b0000_0000_0100_0000;
+            // shows sign of the value - in reality it's just a most significant bit of the result
+            const Sign = 0b0000_0000_1000_0000;
+            const Trace = 0b0000_0001_0000_0000;
+            // when this flag is 1 - CPU react to interupts from external devices
+            const Interupt = 0b0000_0010_0000_0000;
+            // used by some instructions. 0 - processing is done forward, 1 - backward
+            const Direction = 0b0000_0100_0000_0000;
+            // setted to 1 when signed overflow happened 100 + 50 (out of range).
+            // actually it's an derivative of most significant bit
+            const Overflow = 0b0000_1000_0000_0000;
+        }
+    }
+
+    impl X86Memory {
+        fn get_word_value(&self, reg: &Register) -> u16 {
+            #[cfg(debug_assertions)]
+            assert!(reg.reg_type() == RegType::Word);
+
+            if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
+                self.arr.as_u16_ref()[reg.to_word_index()]
+            } else {
+                (self.arr[reg.to_byte_index()] as u16)
+                    | (self.arr[reg.to_byte_index() + 1] as u16) << 8
             }
-            _ => {
-                panic!("unsupported operand for mov {}", instr.format());
+        }
+        fn write_word_value(&mut self, reg: &Register, value: u16) {
+            #[cfg(debug_assertions)]
+            assert!(reg.reg_type() == RegType::Word);
+
+            if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
+                self.arr.as_u16_ref_mut()[reg.to_word_index()] = value;
+            } else {
+                self.arr[reg.to_byte_index()] = (value & 0x00FF) as u8;
+                self.arr[reg.to_byte_index() + 1] = ((value & 0xFF00) >> 8) as u8;
             }
-        },
-        _ => panic!("unsupported OpCode {}", instr.op_code.format()),
-    });
-    (&mut out).if_some_ref_mut(|out| {
-        writeln!(out, "\nFinal registers: ").unwrap();
-        memory.print_registers(out);
-    });
+        }
+
+        fn mov_register<T: Write>(
+            &mut self,
+            instruction: &Instruction,
+            out_opt: &mut Option<&mut T>,
+        ) {
+            let Operand::Register(to_reg) = &instruction.left_operand else {
+                panic!("unexpected instruction {}", instruction.format());
+            };
+            let operand = instruction.right_operand;
+            let flags = instruction.flags;
+
+            let is_wide = to_reg.is_wide();
+            assert_eq!(flags.contains(InstructionFlags::Wide), is_wide);
+            out_opt.if_some_ref_mut(|out| {
+                let word_reg = to_reg.to_word();
+                let prev_value = self.get_word_value(&word_reg);
+
+                out.write(
+                    format!(
+                        "{} ; {} {:#06x} -> ",
+                        instruction.format(),
+                        word_reg.format(),
+                        prev_value
+                    )
+                    .as_bytes(),
+                )
+                .expect("is ok");
+            });
+
+            if is_wide {
+                match &operand {
+                    Operand::Register(from_reg) => {
+                        self.write_word_value(to_reg, self.get_word_value(from_reg));
+                    }
+                    Operand::Immediate(data) => {
+                        self.write_word_value(to_reg, *data as u16);
+                    }
+                    _ => panic!("unexpected operand {}", operand.format()),
+                }
+            } else {
+                match &operand {
+                    Operand::Register(from_reg) => {
+                        #[cfg(debug_assertions)]
+                        assert!(!from_reg.is_wide());
+
+                        self.arr[to_reg.to_byte_index()] = self.arr[from_reg.to_byte_index()];
+                    }
+                    Operand::Immediate(data) => {
+                        #[cfg(debug_assertions)]
+                        assert!(*data <= 0x00FFi16);
+
+                        self.arr[to_reg.to_byte_index()] = (*data) as u8;
+                    }
+                    _ => panic!("unexpected operand {}", operand.format()),
+                }
+            }
+
+            out_opt.if_some_ref_mut(|out| {
+                let word_reg = to_reg.to_word();
+                let next_value = self.get_word_value(&word_reg);
+
+                out.write(format!("{:#06x}\n", next_value).as_bytes())
+                    .expect("is ok");
+            });
+        }
+
+        fn print_registers<T: Write>(&self, out: &mut T) {
+            let registers = [
+                Register::Ax,
+                Register::Bx,
+                Register::Cx,
+                Register::Dx,
+                Register::Sp,
+                Register::Bp,
+                Register::Si,
+                Register::Di,
+            ];
+
+            registers.iter().for_each(|reg| {
+                let value = self.get_word_value(reg);
+
+                writeln!(out, "{} {:#06x} ({})", reg.format(), value, value).unwrap();
+            });
+        }
+    }
+
+    pub fn execute<T: Write>(instructions: Vec<Instruction>, mut out: Option<&mut T>) {
+        let mut memory = X86Memory {
+            arr: core::array::from_fn(|_| 0u8),
+            flags: Flags::empty(),
+        };
+        instructions
+            .iter()
+            .for_each(|instr| match (&instr.op_code, instr.left_operand) {
+                (OpCode::Mov, Operand::Register(_)) => {
+                    memory.mov_register(instr, &mut out);
+                }
+                (OpCode::Cmp, Operand::Register(_)) => {}
+                (OpCode::Add, Operand::Register(_)) => {}
+                (OpCode::Sub, Operand::Register(_)) => {}
+                _ => panic!("unsupported OpCode {}", instr.op_code.format()),
+            });
+        (&mut out).if_some_ref_mut(|out| {
+            writeln!(out, "\nFinal registers: ").unwrap();
+            memory.print_registers(out);
+        });
+    }
+
+    #[derive(PartialEq, Eq)]
+    enum RegType {
+        Low,
+        High,
+        Word,
+    }
+    impl Register {
+        fn to_word(&self) -> Register {
+            match self {
+                Register::Ah => Register::Ax,
+                Register::Al => Register::Ax,
+
+                Register::Bh => Register::Bx,
+                Register::Bl => Register::Bx,
+
+                Register::Ch => Register::Cx,
+                Register::Cl => Register::Cx,
+
+                Register::Dh => Register::Dx,
+                Register::Dl => Register::Dx,
+
+                _ => self.to_owned(),
+            }
+        }
+        fn reg_type(&self) -> RegType {
+            match self {
+                Register::Ah => RegType::High,
+                Register::Bh => RegType::High,
+                Register::Ch => RegType::High,
+                Register::Dh => RegType::High,
+
+                Register::Al => RegType::Low,
+                Register::Bl => RegType::Low,
+                Register::Cl => RegType::Low,
+                Register::Dl => RegType::Low,
+
+                _ => RegType::Word,
+            }
+        }
+        fn bit_mask(&self) -> u16 {
+            match self {
+                Register::Ah => 0xFF00,
+                Register::Bh => 0xFF00,
+                Register::Ch => 0xFF00,
+                Register::Dh => 0xFF00,
+
+                Register::Al => 0x00FF,
+                Register::Bl => 0x00FF,
+                Register::Cl => 0x00FF,
+                Register::Dl => 0x00FF,
+
+                _ => 0xFFFF,
+            }
+        }
+        fn bit_shift(&self) -> u16 {
+            match self {
+                Register::Ah => 8,
+                Register::Bh => 8,
+                Register::Ch => 8,
+                Register::Dh => 8,
+
+                Register::Al => 0,
+                Register::Bl => 0,
+                Register::Cl => 0,
+                Register::Dl => 0,
+
+                _ => 0,
+            }
+        }
+
+        fn to_word_index(&self) -> usize {
+            match self {
+                Register::Ax => 0,
+                Register::Ah => 0,
+                Register::Al => 0,
+
+                Register::Bx => 1,
+                Register::Bh => 1,
+                Register::Bl => 1,
+
+                Register::Cx => 2,
+                Register::Ch => 2,
+                Register::Cl => 2,
+
+                Register::Dx => 3,
+                Register::Dh => 3,
+                Register::Dl => 3,
+
+                Register::Sp => 4,
+                Register::Bp => 5,
+                Register::Si => 6,
+                Register::Di => 7,
+            }
+        }
+
+        // little endian encoding
+        fn to_byte_index(&self) -> usize {
+            match self {
+                Register::Ax => 0,
+                Register::Ah => 1,
+                Register::Al => 0,
+
+                Register::Bx => 2,
+                Register::Bh => 3,
+                Register::Bl => 2,
+
+                Register::Cx => 4,
+                Register::Ch => 5,
+                Register::Cl => 4,
+
+                Register::Dx => 6,
+                Register::Dh => 7,
+                Register::Dl => 6,
+
+                Register::Sp => 8,
+                Register::Bp => 10,
+                Register::Si => 12,
+                Register::Di => 14,
+            }
+        }
+    }
+
+    trait SomeTakable<T> {
+        fn if_some_ref<F: FnOnce(&T)>(&self, mapper: F);
+        fn if_some_ref_mut<F: FnOnce(&mut T)>(&mut self, mapper: F);
+    }
+    impl<T> SomeTakable<T> for Option<T> {
+        fn if_some_ref<F: FnOnce(&T)>(&self, mapper: F) {
+            match self {
+                Some(it) => mapper(it),
+                None => {}
+            }
+        }
+        fn if_some_ref_mut<F: FnOnce(&mut T)>(&mut self, mapper: F) {
+            match self {
+                Some(it) => mapper(it),
+                None => {}
+            }
+        }
+    }
+
+    trait AsU16 {
+        fn as_u16_ref(&self) -> &[u16];
+        fn as_u16_ref_mut(&mut self) -> &mut [u16];
+    }
+
+    impl AsU16 for [u8] {
+        fn as_u16_ref(&self) -> &[u16] {
+            let size = size_of_val(self);
+
+            unsafe { std::slice::from_raw_parts(self.as_ptr().cast::<u16>(), size) }
+        }
+
+        fn as_u16_ref_mut(&mut self) -> &mut [u16] {
+            let size = size_of_val(self);
+
+            unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr().cast::<u16>(), size) }
+        }
+    }
 }
 
 enum CliMode {
@@ -767,6 +806,7 @@ fn main() {
             write_instructions(instrucitons, &mut std::io::stdout().lock());
         }
         CliMode::Exec => {
+            use crate::simulator::execute;
             execute(instrucitons, Some(stdout));
         }
     }
@@ -777,7 +817,8 @@ mod tests {
     use core::str;
     use std::{fs::create_dir, fs::File, io::Write, path::Path, process::Command};
 
-    use crate::{execute, process_binary, read_file, write_instructions};
+    use crate::simulator::execute;
+    use crate::{process_binary, read_file, write_instructions};
 
     fn compile_asm_if_not(path: &str, force_recompile: bool) {
         if force_recompile || !Path::new(path).exists() {
