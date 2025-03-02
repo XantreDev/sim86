@@ -1,0 +1,29 @@
+---
+source: src/main.rs
+expression: "str::from_utf8(res.as_slice()).unwrap()"
+snapshot_kind: text
+---
+add bx, 30000 ; bx 0x0000 -> 0x7530 flags: None -> P
+add bx, 10000 ; bx 0x7530 -> 0x9c40 flags: P -> SO
+sub bx, 5000 ; bx 0x9c40 -> 0x88b8 flags: SO -> PAS
+sub bx, 5000 ; bx 0x88b8 -> 0x7530 flags: PAS -> PO
+mov bx, 1 ; bx 0x7530 -> 0x0001
+mov cx, 100 ; cx 0x0000 -> 0x0064
+add bx, cx ; bx 0x0001 -> 0x0065 flags: PO -> P
+mov dx, 10 ; dx 0x0000 -> 0x000a
+sub cx, dx ; cx 0x0064 -> 0x005a flags: P -> PA
+add bx, -25536 ; bx 0x0065 -> 0x9ca5 flags: PA -> PS
+add cx, -90 ; cx 0x005a -> 0x0000 flags: PS -> CPAZ
+mov sp, 99 ; sp 0x0000 -> 0x0063
+mov bp, 98 ; bp 0x0000 -> 0x0062
+cmp bp, sp ; flags: CPAZ -> CPAS
+
+Final registers: 
+ax 0x0000 (0)
+bx 0x9ca5 (40101)
+cx 0x0000 (0)
+dx 0x000a (10)
+sp 0x0063 (99)
+bp 0x0062 (98)
+si 0x0000 (0)
+di 0x0000 (0)

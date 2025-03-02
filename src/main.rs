@@ -13,7 +13,7 @@ impl Operand {
 }
 
 mod decoder {
-    use std::slice::Iter;
+    use std::{slice::Iter, u8};
 
     use super::structs::*;
 
@@ -114,13 +114,9 @@ mod decoder {
         first: &u8,
         second: &u8,
         content_iter: &mut Iter<u8>,
-        implicit_sign_bit: Option<bool>,
+        sign_extend: bool,
     ) -> Instruction {
-        let sign_extend = if let Some(sign_bit) = implicit_sign_bit {
-            sign_bit
-        } else {
-            (first >> 1 & 0b1) == 0b1
-        };
+        // let sign_extend = explicit_sign_extend.unwrap_or(false);
         let wide = first & 0b1;
 
         let _mod = second >> 6 & 0b11;
@@ -138,7 +134,9 @@ mod decoder {
             let mut init = 0;
             init |= u16::from(*content_iter.next().unwrap());
 
-            if (wide == 0b1 && !sign_extend) {
+            if wide == 0b1 && sign_extend && (init >> 7) & 0b1 == 1 {
+                init |= (u8::MAX as u16) << 8;
+            } else if wide == 0b1 && !sign_extend {
                 init |= u16::from(*content_iter.next().unwrap()) << 8;
             }
 
@@ -342,7 +340,7 @@ mod decoder {
                 first,
                 second,
                 content_iter,
-                Some(false),
+                false,
             )),
 
             0b100000_00..=0b100000_11 => Some(immediate_to_rm(
@@ -350,7 +348,7 @@ mod decoder {
                 first,
                 second,
                 content_iter,
-                None,
+                (first >> 1) & 0b1 == 0b1,
             )),
 
             0b00_000_0_00..=0b00_000_0_11
@@ -426,306 +424,710 @@ fn read_file<T: Into<String>>(file_path: T) -> Vec<u8> {
     content
 }
 
-struct X86Memory {
-    // most of a X86 and ARM processors are little endian, so I will use
-    // little endian as encoding of word size registers
-    // ax - (0, 2)
-    // bx - (2, 4)
-    // cx - (4, 6)
-    // dx - (6, 8)
-    // sp - (8 - 10)
-    // bp - (10 - 12)
-    // si - (12 - 14)
-    // di - (14 - 16)
-    arr: [u8; 8192],
-}
-
-static start_of_memory: usize = 8;
-
-#[derive(PartialEq, Eq)]
-enum RegType {
-    Low,
-    High,
-    Word,
-}
-impl Register {
-    fn to_word(&self) -> Register {
-        match self {
-            Register::Ah => Register::Ax,
-            Register::Al => Register::Ax,
-
-            Register::Bh => Register::Bx,
-            Register::Bl => Register::Bx,
-
-            Register::Ch => Register::Cx,
-            Register::Cl => Register::Cx,
-
-            Register::Dh => Register::Dx,
-            Register::Dl => Register::Dx,
-
-            _ => self.to_owned(),
-        }
-    }
-    fn reg_type(&self) -> RegType {
-        match self {
-            Register::Ah => RegType::High,
-            Register::Bh => RegType::High,
-            Register::Ch => RegType::High,
-            Register::Dh => RegType::High,
-
-            Register::Al => RegType::Low,
-            Register::Bl => RegType::Low,
-            Register::Cl => RegType::Low,
-            Register::Dl => RegType::Low,
-
-            _ => RegType::Word,
-        }
-    }
-    fn bit_mask(&self) -> u16 {
-        match self {
-            Register::Ah => 0xFF00,
-            Register::Bh => 0xFF00,
-            Register::Ch => 0xFF00,
-            Register::Dh => 0xFF00,
-
-            Register::Al => 0x00FF,
-            Register::Bl => 0x00FF,
-            Register::Cl => 0x00FF,
-            Register::Dl => 0x00FF,
-
-            _ => 0xFFFF,
-        }
-    }
-    fn bit_shift(&self) -> u16 {
-        match self {
-            Register::Ah => 8,
-            Register::Bh => 8,
-            Register::Ch => 8,
-            Register::Dh => 8,
-
-            Register::Al => 0,
-            Register::Bl => 0,
-            Register::Cl => 0,
-            Register::Dl => 0,
-
-            _ => 0,
-        }
-    }
-
-    fn to_word_index(&self) -> usize {
-        match self {
-            Register::Ax => 0,
-            Register::Ah => 0,
-            Register::Al => 0,
-
-            Register::Bx => 1,
-            Register::Bh => 1,
-            Register::Bl => 1,
-
-            Register::Cx => 2,
-            Register::Ch => 2,
-            Register::Cl => 2,
-
-            Register::Dx => 3,
-            Register::Dh => 3,
-            Register::Dl => 3,
-
-            Register::Sp => 4,
-            Register::Bp => 5,
-            Register::Si => 6,
-            Register::Di => 7,
-        }
-    }
-
-    // little endian encoding
-    fn to_byte_index(&self) -> usize {
-        match self {
-            Register::Ax => 0,
-            Register::Ah => 1,
-            Register::Al => 0,
-
-            Register::Bx => 2,
-            Register::Bh => 3,
-            Register::Bl => 2,
-
-            Register::Cx => 4,
-            Register::Ch => 5,
-            Register::Cl => 4,
-
-            Register::Dx => 6,
-            Register::Dh => 7,
-            Register::Dl => 6,
-
-            Register::Sp => 8,
-            Register::Bp => 10,
-            Register::Si => 12,
-            Register::Di => 14,
-        }
-    }
-}
-
-trait SomeTakable<T> {
-    fn if_some_ref<F: FnOnce(&T)>(&self, mapper: F);
-    fn if_some_ref_mut<F: FnOnce(&mut T)>(&mut self, mapper: F);
-}
-impl<T> SomeTakable<T> for Option<T> {
-    fn if_some_ref<F: FnOnce(&T)>(&self, mapper: F) {
-        match self {
-            Some(it) => mapper(it),
-            None => {}
-        }
-    }
-    fn if_some_ref_mut<F: FnOnce(&mut T)>(&mut self, mapper: F) {
-        match self {
-            Some(it) => mapper(it),
-            None => {}
-        }
-    }
-}
-
-trait AsU16 {
-    fn as_u16_ref(&self) -> &[u16];
-    fn as_u16_ref_mut(&mut self) -> &mut [u16];
-}
-
-impl AsU16 for [u8] {
-    fn as_u16_ref(&self) -> &[u16] {
-        let size = size_of_val(self);
-
-        unsafe { std::slice::from_raw_parts(self.as_ptr().cast::<u16>(), size) }
-    }
-
-    fn as_u16_ref_mut(&mut self) -> &mut [u16] {
-        let size = size_of_val(self);
-
-        unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr().cast::<u16>(), size) }
-    }
-}
-
-impl X86Memory {
-    fn get_word_value(&self, reg: &Register) -> u16 {
-        #[cfg(debug_assertions)]
-        assert!(reg.reg_type() == RegType::Word);
-
-        if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
-            self.arr.as_u16_ref()[reg.to_word_index()]
-        } else {
-            (self.arr[reg.to_byte_index()] as u16) | (self.arr[reg.to_byte_index() + 1] as u16) << 8
-        }
-    }
-    fn write_word_value(&mut self, reg: &Register, value: u16) {
-        #[cfg(debug_assertions)]
-        assert!(reg.reg_type() == RegType::Word);
-
-        if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
-            self.arr.as_u16_ref_mut()[reg.to_word_index()] = value;
-        } else {
-            self.arr[reg.to_byte_index()] = (value & 0x00FF) as u8;
-            self.arr[reg.to_byte_index() + 1] = ((value & 0xFF00) >> 8) as u8;
-        }
-    }
-
-    fn mov_register<T: Write>(&mut self, instruction: &Instruction, out_opt: &mut Option<&mut T>) {
-        let Operand::Register(to_reg) = &instruction.left_operand else {
-            panic!("unexpected instruction {}", instruction.format());
-        };
-        let operand = instruction.right_operand;
-        let flags = instruction.flags;
-
-        let is_wide = to_reg.is_wide();
-        assert_eq!(flags.contains(InstructionFlags::Wide), is_wide);
-        out_opt.if_some_ref_mut(|out| {
-            let word_reg = to_reg.to_word();
-            let prev_value = self.get_word_value(&word_reg);
-
-            out.write(
-                format!(
-                    "{} ; {} {:#06x} -> ",
-                    instruction.format(),
-                    word_reg.format(),
-                    prev_value
-                )
-                .as_bytes(),
-            )
-            .expect("is ok");
-        });
-
-        if is_wide {
-            match &operand {
-                Operand::Register(from_reg) => {
-                    self.write_word_value(to_reg, self.get_word_value(from_reg));
-                }
-                Operand::Immediate(data) => {
-                    self.write_word_value(to_reg, *data as u16);
-                }
-                _ => panic!("unexpected operand {}", operand.format()),
-            }
-        } else {
-            match &operand {
-                Operand::Register(from_reg) => {
-                    #[cfg(debug_assertions)]
-                    assert!(!from_reg.is_wide());
-
-                    self.arr[to_reg.to_byte_index()] = self.arr[from_reg.to_byte_index()];
-                }
-                Operand::Immediate(data) => {
-                    #[cfg(debug_assertions)]
-                    assert!(*data <= 0x00FFi16);
-
-                    self.arr[to_reg.to_byte_index()] = (*data) as u8;
-                }
-                _ => panic!("unexpected operand {}", operand.format()),
-            }
-        }
-
-        out_opt.if_some_ref_mut(|out| {
-            let word_reg = to_reg.to_word();
-            let next_value = self.get_word_value(&word_reg);
-
-            out.write(format!("{:#06x}\n", next_value).as_bytes())
-                .expect("is ok");
-        });
-    }
-
-    fn print_registers<T: Write>(&self, out: &mut T) {
-        let registers = [
-            Register::Ax,
-            Register::Bx,
-            Register::Cx,
-            Register::Dx,
-            Register::Sp,
-            Register::Bp,
-            Register::Si,
-            Register::Di,
-        ];
-
-        registers.iter().for_each(|reg| {
-            let value = self.get_word_value(reg);
-
-            writeln!(out, "{} {:#06x} ({})", reg.format(), value, value).unwrap();
-        });
-    }
-}
-
-fn execute<T: Write>(instructions: Vec<Instruction>, mut out: Option<&mut T>) {
-    let mut memory = X86Memory {
-        arr: core::array::from_fn(|_| 0u8),
+mod simulator {
+    use crate::{
+        format::Formattable, Instruction, InstructionFlags, IsWide, OpCode, Operand, Register,
     };
-    instructions.iter().for_each(|instr| match instr.op_code {
-        OpCode::Mov => match instr.left_operand {
-            Operand::Register(_) => {
-                memory.mov_register(instr, &mut out);
+    use bitflags::bitflags;
+    use std::io::Write;
+
+    struct X86Memory {
+        // most of a X86 and ARM processors are little endian, so I will use
+        // little endian as encoding of word size registers
+        // ax - (0, 2)
+        // bx - (2, 4)
+        // cx - (4, 6)
+        // dx - (6, 8)
+        // sp - (8 - 10)
+        // bp - (10 - 12)
+        // si - (12 - 14)
+        // di - (14 - 16)
+        arr: [u8; 8192],
+
+        flags: Flags,
+    }
+    static start_of_memory: usize = 8;
+
+    bitflags! {
+        #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        pub struct Flags: u16 {
+            // if unsigned overflow happend
+            const Carry = 0b0000_0000_0000_0000_0001;
+            // checks whenever there is an even amount of 1 bits in the result (checks only 8 low bits)
+            const Parity = 0b0000_0000_0000_0000_0100;
+            // check for unsigned overflow in low nibble (4 bits)
+            const AuxiliaryCarry = 0b0000_0000_0001_0000;
+            // if result is zero -> sets to 1
+            const Zero = 0b0000_0000_0100_0000;
+            // shows sign of the value - in reality it's just a most significant bit of the result
+            const Sign = 0b0000_0000_1000_0000;
+            const Trace = 0b0000_0001_0000_0000;
+            // when this flag is 1 - CPU react to interupts from external devices
+            const Interupt = 0b0000_0010_0000_0000;
+            // used by some instructions. 0 - processing is done forward, 1 - backward
+            const Direction = 0b0000_0100_0000_0000;
+            // setted to 1 when signed overflow happened 100 + 50 (out of range).
+            // actually it's an derivative of most significant bit
+            const Overflow = 0b0000_1000_0000_0000;
+        }
+    }
+
+    impl Formattable for Flags {
+        fn format(&self) -> String {
+            let mut res = String::with_capacity(9);
+            if self.contains(Flags::Carry) {
+                res.push_str("C");
             }
-            _ => {
-                panic!("unsupported operand for mov {}", instr.format());
+            if self.contains(Flags::Parity) {
+                res.push_str("P");
             }
-        },
-        _ => panic!("unsupported OpCode {}", instr.op_code.format()),
-    });
-    (&mut out).if_some_ref_mut(|out| {
-        writeln!(out, "\nFinal registers: ").unwrap();
-        memory.print_registers(out);
-    });
+            if self.contains(Flags::AuxiliaryCarry) {
+                res.push_str("A");
+            }
+            if self.contains(Flags::Zero) {
+                res.push_str("Z");
+            }
+            if self.contains(Flags::Sign) {
+                res.push_str("S");
+            }
+            if self.contains(Flags::Trace) {
+                res.push_str("T");
+            }
+            if self.contains(Flags::Interupt) {
+                res.push_str("I");
+            }
+            if self.contains(Flags::Direction) {
+                res.push_str("D");
+            }
+
+            if self.contains(Flags::Overflow) {
+                res.push_str("O");
+            }
+            if self.is_empty() {
+                res.push_str("None");
+            }
+
+            res
+        }
+    }
+
+    enum ArithmeticAction {
+        Add,
+        Sub,
+    }
+    #[derive(PartialEq, Eq)]
+    enum ArithmeticOp {
+        Add,
+        Sub,
+        Cmp,
+    }
+    impl From<&ArithmeticOp> for ArithmeticAction {
+        fn from(from: &ArithmeticOp) -> ArithmeticAction {
+            match from {
+                ArithmeticOp::Add => ArithmeticAction::Add,
+                ArithmeticOp::Cmp | ArithmeticOp::Sub => ArithmeticAction::Sub,
+            }
+        }
+    }
+
+    impl Operand {
+        fn as_register(self) -> Option<Register> {
+            match self {
+                Operand::Register(reg) => Some(reg),
+                _ => None,
+            }
+        }
+    }
+
+    #[derive(PartialEq, Eq)]
+    enum Sign {
+        Positive,
+        Negative,
+    }
+    fn sign(value: u16, is_wide: bool) -> Sign {
+        match is_wide {
+            true if (value >> 15 & 0b1) == 1 => Sign::Negative,
+            true => Sign::Positive,
+
+            false if (value >> 7 & 0b1) == 1 => Sign::Negative,
+            false => Sign::Positive,
+        }
+    }
+
+    fn produce_math_op_flags(
+        before: u16,
+        right_sign: Sign,
+        after: u16,
+        arithm_op: ArithmeticAction,
+        is_wide: bool,
+    ) -> Flags {
+        let carry_flag = match arithm_op {
+            // 1xxx -> 0xxx while add
+            // 1111
+            // 1111
+            //11110
+            ArithmeticAction::Add if before > after => Flags::Carry,
+            // borrow 0xxx -> 1xxx
+            ArithmeticAction::Sub if before < after => Flags::Carry,
+            _ => Flags::empty(),
+        };
+        // 1111 + 0001 = 0001_0000
+        // 0001_0000 - 0001 = 1111
+        let auxilary_carry_flag = match arithm_op {
+            // ArithmeticOps::Add if (before & 0xF) + (after & 0xF) > 0xF => Flags::AuxiliaryCarry,
+            ArithmeticAction::Add if (before & 0xF) > (after & 0xF) => Flags::AuxiliaryCarry,
+            ArithmeticAction::Add => Flags::empty(),
+            ArithmeticAction::Sub if (before & 0xF) < (after & 0xF) => Flags::AuxiliaryCarry,
+            ArithmeticAction::Sub => Flags::empty(),
+        };
+
+        let zero_flag = if after == 0 {
+            Flags::Zero
+        } else {
+            Flags::empty()
+        };
+
+        let sign_before = sign(before, is_wide);
+        let sign_flag = match sign(after, is_wide) {
+            Sign::Positive => Flags::empty(),
+            Sign::Negative => Flags::Sign,
+        };
+
+        let partiy_flag = {
+            let mut ones_amount = 0;
+
+            // unrolled loop
+            if (after & (1 << 0)) != 0 {
+                ones_amount += 1;
+            }
+            if (after & (1 << 1)) != 0 {
+                ones_amount += 1;
+            }
+            if (after & (1 << 2)) != 0 {
+                ones_amount += 1;
+            }
+            if (after & (1 << 3)) != 0 {
+                ones_amount += 1;
+            }
+            if (after & (1 << 4)) != 0 {
+                ones_amount += 1;
+            }
+            if (after & (1 << 5)) != 0 {
+                ones_amount += 1;
+            }
+            if (after & (1 << 6)) != 0 {
+                ones_amount += 1;
+            }
+            if (after & (1 << 7)) != 0 {
+                ones_amount += 1;
+            }
+
+            if ones_amount % 2 == 0 {
+                Flags::Parity
+            } else {
+                Flags::empty()
+            }
+        };
+
+        let overflow_flag = match (
+            arithm_op,
+            sign_before,
+            right_sign,
+            if sign_flag == Flags::Sign {
+                Sign::Negative
+            } else {
+                Sign::Positive
+            },
+        ) {
+            // negative sum of possitive operands
+            (ArithmeticAction::Add, Sign::Positive, Sign::Positive, Sign::Negative) => {
+                Flags::Overflow
+            }
+            (ArithmeticAction::Add, Sign::Negative, Sign::Negative, Sign::Positive) => {
+                Flags::Overflow
+            }
+            // positive sum of negative operands
+            (ArithmeticAction::Sub, Sign::Negative, Sign::Positive, Sign::Positive) => {
+                Flags::Overflow
+            }
+            (ArithmeticAction::Sub, Sign::Positive, Sign::Negative, Sign::Negative) => {
+                Flags::Overflow
+            }
+            _ => Flags::empty(),
+        };
+
+        carry_flag | zero_flag | sign_flag | partiy_flag | auxilary_carry_flag | overflow_flag
+    }
+
+    fn execute_add(left: u16, right: u16, is_wide: bool) -> u16 {
+        let res = (left as u32) + (right as u32);
+        let restructed_op = if is_wide {
+            res as u16
+        } else {
+            (res as u8) as u16
+        };
+
+        restructed_op
+    }
+
+    #[test]
+    fn test_execute_add() {
+        assert!(execute_add(0x29, 0x4c, true) == 117);
+        assert!(execute_add(0x29, 0x4c, false) == 117);
+        assert!(execute_add(0xA9, 0x7c, true) == 293);
+        assert!(execute_add(0xA0_09, 0xA0_09, true) == 16402);
+        assert!(execute_add(0xA9, 0x7c, false) == 37);
+    }
+
+    #[test]
+    fn test_produce_flags() {
+        {
+            let before = 0x29;
+
+            let flags = execute_arithmetic_op(before, 0x4c, &ArithmeticOp::Add, true).1;
+            assert!(flags == Flags::AuxiliaryCarry);
+        };
+        {
+            let flags = execute_arithmetic_op(0b1000, 0b001, &ArithmeticOp::Add, true).1;
+            assert!(flags == Flags::Parity);
+        };
+
+        {
+            let flags = execute_arithmetic_op(1, 1, &ArithmeticOp::Sub, true).1;
+            assert!(flags == Flags::Parity | Flags::Zero);
+        };
+
+        {
+            let before = 0x80;
+            let flags = execute_arithmetic_op(before, 0xF0, &ArithmeticOp::Add, false).1;
+            assert_eq!(flags, Flags::Carry);
+        };
+    }
+
+    fn execute_sub(left: u16, right: u16, is_wide: bool) -> u16 {
+        let res = if right > left {
+            // it's fine to have ones in upper byte for non wide operation
+            // since we trim them anyway
+            ((left as u32) | (0b1 << 16)) - (right as u32)
+        } else {
+            (left as u32) - (right as u32)
+        };
+        let restructed_op = if is_wide {
+            res as u16
+        } else {
+            (res as u8) as u16
+        };
+
+        restructed_op
+    }
+
+    #[test]
+    fn test_execute_sub() {
+        // borrowing
+        assert_eq!(execute_sub(0x29, 0x4c, true), 65501);
+        assert!(execute_sub(0x29, 0x4c, false) == 221);
+
+        assert!(execute_sub(0x29, 0x20, true) == 0x09);
+        assert!(execute_sub(0x29, 0x20, false) == 0x09);
+    }
+
+    fn execute_arithmetic_op(
+        left: u16,
+        right: u16,
+        arithm_op: &ArithmeticOp,
+        is_wide: bool,
+    ) -> (u16, Flags) {
+        let op_result = match arithm_op {
+            ArithmeticOp::Add => execute_add(left, right, is_wide),
+            ArithmeticOp::Sub | ArithmeticOp::Cmp => execute_sub(left, right, is_wide),
+        };
+        let flags = produce_math_op_flags(
+            left,
+            sign(right, is_wide),
+            op_result,
+            arithm_op.into(),
+            is_wide,
+        );
+        let reg_value = match arithm_op {
+            ArithmeticOp::Cmp => left,
+            _ => op_result,
+        };
+
+        (reg_value, flags)
+    }
+
+    impl X86Memory {
+        fn get_word_value(&self, reg: &Register) -> u16 {
+            #[cfg(debug_assertions)]
+            assert!(reg.reg_type() == RegType::Word);
+
+            if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
+                self.arr.as_u16_ref()[reg.to_word_index()]
+            } else {
+                (self.arr[reg.to_byte_index()] as u16)
+                    | (self.arr[reg.to_byte_index() + 1] as u16) << 8
+            }
+        }
+        fn get_value(&self, reg: &Register) -> u16 {
+            if (reg.is_wide()) {
+                self.get_word_value(reg)
+            } else {
+                self.arr[reg.to_byte_index()] as u16
+            }
+        }
+        fn write_word_value(&mut self, reg: &Register, value: u16) {
+            #[cfg(debug_assertions)]
+            assert!(reg.reg_type() == RegType::Word);
+
+            if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
+                self.arr.as_u16_ref_mut()[reg.to_word_index()] = value;
+            } else {
+                self.arr[reg.to_byte_index()] = (value & 0x00FF) as u8;
+                self.arr[reg.to_byte_index() + 1] = ((value & 0xFF00) >> 8) as u8;
+            }
+        }
+        fn write_byte_value(&mut self, reg: &Register, value: u8) {
+            #[cfg(debug_assertions)]
+            assert!(reg.reg_type() != RegType::Word);
+            self.arr[reg.to_byte_index()] = value;
+        }
+
+        fn write_value(&mut self, reg: &Register, value: u16) {
+            if reg.is_wide() {
+                self.write_word_value(reg, value);
+            } else {
+                self.write_byte_value(reg, value as u8);
+            }
+        }
+
+        fn arithmetic_register<T: Write>(
+            &mut self,
+            instruction: &Instruction,
+            out_opt: &mut Option<&mut T>,
+        ) {
+            let arithm_op = match instruction.op_code {
+                OpCode::Add => ArithmeticOp::Add,
+                OpCode::Sub => ArithmeticOp::Sub,
+                OpCode::Cmp => ArithmeticOp::Cmp,
+                _ => panic!("wrong opcode {:?}", instruction.op_code),
+            };
+            let left_reg = instruction
+                .left_operand
+                .as_register()
+                .expect("it's arithmetic op for rigister operands");
+
+            assert_eq!(
+                instruction.flags.contains(InstructionFlags::Wide),
+                left_reg.is_wide()
+            );
+            let right = instruction.right_operand;
+
+            let is_wide = left_reg.is_wide();
+
+            out_opt.if_some_ref_mut(|out| {
+                let word_reg = left_reg.to_word();
+                let prev_value = self.get_word_value(&word_reg);
+
+                out.write(format!("{} ; ", instruction.format(),).as_bytes())
+                    .expect("is ok");
+
+                if arithm_op != ArithmeticOp::Cmp {
+                    out.write(format!("{} {:#06x} -> ", word_reg.format(), prev_value).as_bytes())
+                        .expect("should write");
+                }
+            });
+
+            let left_value = self.get_value(&left_reg);
+            let right_value = match right {
+                Operand::Immediate(value) => value as u16,
+                Operand::Register(right_reg) => self.get_value(&right_reg),
+                _ => panic!("invariant arithm r_val"),
+            };
+
+            let (next_value, flags) =
+                execute_arithmetic_op(left_value, right_value, &arithm_op, is_wide);
+
+            out_opt.if_some_ref_mut(|out| {
+                if arithm_op != ArithmeticOp::Cmp {
+                    out.write(format!("{:#06x} ", next_value).as_bytes())
+                        .expect("write is ok");
+                }
+
+                writeln!(out, "flags: {} -> {}", self.flags.format(), flags.format())
+                    .expect("write is fine");
+            });
+
+            self.flags = flags;
+            self.write_value(&left_reg, next_value);
+        }
+
+        fn mov_register<T: Write>(
+            &mut self,
+            instruction: &Instruction,
+            out_opt: &mut Option<&mut T>,
+        ) {
+            let Operand::Register(to_reg) = &instruction.left_operand else {
+                panic!("unexpected instruction {}", instruction.format());
+            };
+            let operand = instruction.right_operand;
+            let flags = instruction.flags;
+
+            let is_wide = to_reg.is_wide();
+            assert_eq!(flags.contains(InstructionFlags::Wide), is_wide);
+            out_opt.if_some_ref_mut(|out| {
+                let word_reg = to_reg.to_word();
+                let prev_value = self.get_word_value(&word_reg);
+
+                out.write(
+                    format!(
+                        "{} ; {} {:#06x} -> ",
+                        instruction.format(),
+                        word_reg.format(),
+                        prev_value
+                    )
+                    .as_bytes(),
+                )
+                .expect("is ok");
+            });
+
+            if is_wide {
+                match &operand {
+                    Operand::Register(from_reg) => {
+                        self.write_word_value(to_reg, self.get_word_value(from_reg));
+                    }
+                    Operand::Immediate(data) => {
+                        self.write_word_value(to_reg, *data as u16);
+                    }
+                    _ => panic!("unexpected operand {}", operand.format()),
+                }
+            } else {
+                match &operand {
+                    Operand::Register(from_reg) => {
+                        #[cfg(debug_assertions)]
+                        assert!(!from_reg.is_wide());
+
+                        self.arr[to_reg.to_byte_index()] = self.arr[from_reg.to_byte_index()];
+                    }
+                    Operand::Immediate(data) => {
+                        #[cfg(debug_assertions)]
+                        assert!(*data <= 0x00FFi16);
+
+                        self.arr[to_reg.to_byte_index()] = (*data) as u8;
+                    }
+                    _ => panic!("unexpected operand {}", operand.format()),
+                }
+            }
+
+            out_opt.if_some_ref_mut(|out| {
+                let word_reg = to_reg.to_word();
+                let next_value = self.get_word_value(&word_reg);
+
+                out.write(format!("{:#06x}\n", next_value).as_bytes())
+                    .expect("is ok");
+            });
+        }
+
+        fn print_registers<T: Write>(&self, out: &mut T) {
+            let registers = [
+                Register::Ax,
+                Register::Bx,
+                Register::Cx,
+                Register::Dx,
+                Register::Sp,
+                Register::Bp,
+                Register::Si,
+                Register::Di,
+            ];
+
+            registers.iter().for_each(|reg| {
+                let value = self.get_word_value(reg);
+
+                writeln!(out, "{} {:#06x} ({})", reg.format(), value, value).unwrap();
+            });
+        }
+    }
+
+    pub fn execute<T: Write>(instructions: Vec<Instruction>, mut out: Option<&mut T>) {
+        let mut memory = X86Memory {
+            arr: core::array::from_fn(|_| 0u8),
+            flags: Flags::empty(),
+        };
+        instructions
+            .iter()
+            .for_each(|instr| match (&instr.op_code, instr.left_operand) {
+                (OpCode::Mov, Operand::Register(_)) => {
+                    memory.mov_register(instr, &mut out);
+                }
+                (OpCode::Cmp | OpCode::Add | OpCode::Sub, Operand::Register(_)) => {
+                    memory.arithmetic_register(instr, &mut out);
+                }
+                _ => panic!("unsupported OpCode {}", instr.op_code.format()),
+            });
+        (&mut out).if_some_ref_mut(|out| {
+            writeln!(out, "\nFinal registers: ").unwrap();
+            memory.print_registers(out);
+        });
+    }
+
+    #[derive(PartialEq, Eq)]
+    enum RegType {
+        Low,
+        High,
+        Word,
+    }
+    impl Register {
+        fn to_word(&self) -> Register {
+            match self {
+                Register::Ah => Register::Ax,
+                Register::Al => Register::Ax,
+
+                Register::Bh => Register::Bx,
+                Register::Bl => Register::Bx,
+
+                Register::Ch => Register::Cx,
+                Register::Cl => Register::Cx,
+
+                Register::Dh => Register::Dx,
+                Register::Dl => Register::Dx,
+
+                _ => self.to_owned(),
+            }
+        }
+        fn reg_type(&self) -> RegType {
+            match self {
+                Register::Ah => RegType::High,
+                Register::Bh => RegType::High,
+                Register::Ch => RegType::High,
+                Register::Dh => RegType::High,
+
+                Register::Al => RegType::Low,
+                Register::Bl => RegType::Low,
+                Register::Cl => RegType::Low,
+                Register::Dl => RegType::Low,
+
+                _ => RegType::Word,
+            }
+        }
+        fn bit_mask(&self) -> u16 {
+            match self {
+                Register::Ah => 0xFF00,
+                Register::Bh => 0xFF00,
+                Register::Ch => 0xFF00,
+                Register::Dh => 0xFF00,
+
+                Register::Al => 0x00FF,
+                Register::Bl => 0x00FF,
+                Register::Cl => 0x00FF,
+                Register::Dl => 0x00FF,
+
+                _ => 0xFFFF,
+            }
+        }
+        fn bit_shift(&self) -> u16 {
+            match self {
+                Register::Ah => 8,
+                Register::Bh => 8,
+                Register::Ch => 8,
+                Register::Dh => 8,
+
+                Register::Al => 0,
+                Register::Bl => 0,
+                Register::Cl => 0,
+                Register::Dl => 0,
+
+                _ => 0,
+            }
+        }
+
+        fn to_word_index(&self) -> usize {
+            match self {
+                Register::Ax => 0,
+                Register::Ah => 0,
+                Register::Al => 0,
+
+                Register::Bx => 1,
+                Register::Bh => 1,
+                Register::Bl => 1,
+
+                Register::Cx => 2,
+                Register::Ch => 2,
+                Register::Cl => 2,
+
+                Register::Dx => 3,
+                Register::Dh => 3,
+                Register::Dl => 3,
+
+                Register::Sp => 4,
+                Register::Bp => 5,
+                Register::Si => 6,
+                Register::Di => 7,
+            }
+        }
+
+        // little endian encoding
+        fn to_byte_index(&self) -> usize {
+            match self {
+                Register::Ax => 0,
+                Register::Ah => 1,
+                Register::Al => 0,
+
+                Register::Bx => 2,
+                Register::Bh => 3,
+                Register::Bl => 2,
+
+                Register::Cx => 4,
+                Register::Ch => 5,
+                Register::Cl => 4,
+
+                Register::Dx => 6,
+                Register::Dh => 7,
+                Register::Dl => 6,
+
+                Register::Sp => 8,
+                Register::Bp => 10,
+                Register::Si => 12,
+                Register::Di => 14,
+            }
+        }
+    }
+
+    trait SomeTakable<T> {
+        fn if_some_ref<F: FnOnce(&T)>(&self, mapper: F);
+        fn if_some_ref_mut<F: FnOnce(&mut T)>(&mut self, mapper: F);
+    }
+    impl<T> SomeTakable<T> for Option<T> {
+        fn if_some_ref<F: FnOnce(&T)>(&self, mapper: F) {
+            match self {
+                Some(it) => mapper(it),
+                None => {}
+            }
+        }
+        fn if_some_ref_mut<F: FnOnce(&mut T)>(&mut self, mapper: F) {
+            match self {
+                Some(it) => mapper(it),
+                None => {}
+            }
+        }
+    }
+
+    trait AsU16 {
+        fn as_u16_ref(&self) -> &[u16];
+        fn as_u16_ref_mut(&mut self) -> &mut [u16];
+    }
+
+    impl AsU16 for [u8] {
+        fn as_u16_ref(&self) -> &[u16] {
+            let size = size_of_val(self);
+
+            unsafe { std::slice::from_raw_parts(self.as_ptr().cast::<u16>(), size) }
+        }
+
+        fn as_u16_ref_mut(&mut self) -> &mut [u16] {
+            let size = size_of_val(self);
+
+            unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr().cast::<u16>(), size) }
+        }
+    }
 }
 
 enum CliMode {
@@ -767,6 +1169,7 @@ fn main() {
             write_instructions(instrucitons, &mut std::io::stdout().lock());
         }
         CliMode::Exec => {
+            use crate::simulator::execute;
             execute(instrucitons, Some(stdout));
         }
     }
@@ -777,7 +1180,8 @@ mod tests {
     use core::str;
     use std::{fs::create_dir, fs::File, io::Write, path::Path, process::Command};
 
-    use crate::{execute, process_binary, read_file, write_instructions};
+    use crate::simulator::execute;
+    use crate::{process_binary, read_file, write_instructions};
 
     fn compile_asm_if_not(path: &str, force_recompile: bool) {
         if force_recompile || !Path::new(path).exists() {
@@ -836,6 +1240,8 @@ mod tests {
             "./input/listing_0043_immediate_movs",
             "./input/listing_0044_register_movs",
             "./input/listing_0044_register_movs_extended",
+            "./input/listing_0046_add_sub_cmp",
+            "./input/listing_0047_challenge_flags",
         ];
         let force_recompilation = std::env::var("RECOMPILE").map_or(false, |it| it == "true");
 

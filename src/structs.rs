@@ -53,9 +53,11 @@ pub enum Operand {
     Address(Option<Register>, Option<Register>, Option<i16>),
     JumpDisplacement(i8),
     Empty,
+    // TODO: make u16
     Immediate(i16),
 }
 
+#[derive(Debug)]
 pub enum OpCode {
     Mov,
     Add,
