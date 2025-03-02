@@ -56,6 +56,7 @@ pub enum Operand {
     Immediate(i16),
 }
 
+#[derive(Debug)]
 pub enum OpCode {
     Mov,
     Add,

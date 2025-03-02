@@ -428,7 +428,7 @@ fn read_file<T: Into<String>>(file_path: T) -> Vec<u8> {
 
 mod simulator {
     use crate::{
-        format::Formattable, Instruction, InstructionFlags, IsWide, OpCode, Operand, Register,
+        format::Formattable, main, Instruction, InstructionFlags, IsWide, OpCode, Operand, Register
     };
     use bitflags::bitflags;
     use std::{io::Write, slice::Iter};
@@ -474,6 +474,21 @@ mod simulator {
         }
     }
 
+    enum ArithmeticOps {
+        Add,
+        Sub,
+        Cmp
+    }
+
+    impl Operand {
+        fn as_register(self) -> Option<Register> {
+            match self {
+                Operand::Register(reg) => Some(reg),
+                _ => None
+            }
+        }
+    }
+
     impl X86Memory {
         fn get_word_value(&self, reg: &Register) -> u16 {
             #[cfg(debug_assertions)]
@@ -486,6 +501,13 @@ mod simulator {
                     | (self.arr[reg.to_byte_index() + 1] as u16) << 8
             }
         }
+        fn get_value(&self, reg: &Register) -> u16 {
+            if (reg.is_wide()) {
+                self.get_word_value(reg)
+            } else {
+                self.arr[reg.to_byte_index()] as u16
+            }
+        }
         fn write_word_value(&mut self, reg: &Register, value: u16) {
             #[cfg(debug_assertions)]
             assert!(reg.reg_type() == RegType::Word);
@@ -496,6 +518,90 @@ mod simulator {
                 self.arr[reg.to_byte_index()] = (value & 0x00FF) as u8;
                 self.arr[reg.to_byte_index() + 1] = ((value & 0xFF00) >> 8) as u8;
             }
+        }
+
+        fn arithmetic_register<T : Write>(
+            &mut self,
+            instruction: &Instruction,
+            out_opt: &mut Option<&mut T>,
+        ) {
+            let op = match instruction.op_code {
+                OpCode::Add => ArithmeticOps::Add,
+                OpCode::Sub => ArithmeticOps::Sub,
+                OpCode::Cmp => ArithmeticOps::Cmp,
+                _ => panic!("wrong opcode {:?}", instruction.op_code),
+            };
+            let to_reg = instruction.left_operand.as_register()
+                .expect("it's arithmetic op for rigister operands");
+            let from_reg = instruction.right_operand.as_register()
+                .expect("it's arithmetic op for rigister operands");
+
+            let is_wide = to_reg.is_wide();
+            assert_eq!(to_reg.is_wide(), from_reg.is_wide());
+            assert_eq!(instruction.flags.contains(InstructionFlags::Wide), to_reg.is_wide());
+
+            // what will happen if overflow happen during 8 bit operation?
+            let to_reg_value = self.get_value(&to_reg);
+            let from_reg_value = self.get_value(&from_reg);
+
+            // [TODO]: add tests
+            let flags = {
+                let full_result = (to_reg_value as u32) + (from_reg_value as u32);
+
+                let carry_flag = match is_wide {
+                    true if (full_result > u16::MAX.into()) => Flags::Carry,
+                    false if (full_result > u8::MAX.into()) => Flags::Carry,
+                    _ => Flags::empty(),
+                };
+                let zero_flag = match is_wide {
+                    true if (full_result as u16) == 0 => Flags::Zero,
+                    false if (full_result as u8) == 0 => Flags::Zero,
+                    _ => Flags::empty(),
+                };
+
+                let sign_flag = match is_wide {
+                    true if (full_result & 0b1000_0000_0000_0000) != 0 => Flags::Sign,
+                    false if (full_result & 0b0000_0000_1000_0000) != 0 => Flags::Sign,
+                    _ => Flags::empty(),
+                };
+
+                let partiy_flag = {
+                    let result = full_result as u8;
+                    let mut ones_amount = 0;
+
+                    // unrolled loop
+                    if (result & (1 << 0)) != 0 { ones_amount += 1; }
+                    if (result & (1 << 1)) != 0 { ones_amount += 1; }
+                    if (result & (1 << 2)) != 0 { ones_amount += 1; }
+                    if (result & (1 << 3)) != 0 { ones_amount += 1; }
+                    if (result & (1 << 4)) != 0 { ones_amount += 1; }
+                    if (result & (1 << 5)) != 0 { ones_amount += 1; }
+                    if (result & (1 << 6)) != 0 { ones_amount += 1; }
+                    if (result & (1 << 7)) != 0 { ones_amount += 1; }
+
+                    if ones_amount % 2 == 0 {
+                        Flags::Parity
+                    } else {
+                        Flags::empty()
+                    }
+                };
+
+                let auxilary_carry_flag = if (to_reg_value & 0xF) + (from_reg_value & 0xF) > 0xF {
+                    Flags::AuxiliaryCarry
+                } else {
+                    Flags::empty()
+                };
+
+                let overflow_flag = match is_wide {
+                    true if (to_reg_value & (1 << 15)) != ((full_result as u16) & (1 << 15)) => Flags::Overflow,
+                    false if (to_reg_value & (1 << 7)) != ((full_result as u16) & (1 << 7)) => Flags::Overflow,
+                    _ => Flags::empty()
+                };
+
+                carry_flag | zero_flag | sign_flag | partiy_flag | auxilary_carry_flag | overflow_flag;
+            };
+            // let next_value =
+
         }
 
         fn mov_register<T: Write>(
