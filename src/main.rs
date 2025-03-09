@@ -796,7 +796,7 @@ mod simulator {
     }
 
     impl<'a> Iterator for CountingIter<'a> {
-        type Item = &'a u8;
+        type Item = u8;
         fn next(&mut self) -> Option<Self::Item> {
             let next_idx = (self.start_idx + self.movs) as usize;
             if next_idx >= self.data.len() {
@@ -804,7 +804,7 @@ mod simulator {
             } else {
                 let res = &self.data[next_idx];
                 self.movs += 1;
-                Some(res)
+                Some(*res)
             }
         }
     }
@@ -821,7 +821,7 @@ mod simulator {
 
         fn run<T: Write>(&mut self, out_opt: &mut Option<&mut T>) {
             loop {
-                let iter = CountingIter {
+                let mut iter = CountingIter {
                     data: &self.instructions,
                     start_idx: self.ip,
                     movs: 0,
@@ -829,14 +829,19 @@ mod simulator {
                 let Some(instr) = decoder::decode_instruction(&mut iter) else {
                     return;
                 };
-                |instr| match (&instr.op_code, instr.left_operand) {
+                let movs = iter.movs;
+                match (&instr.op_code, instr.left_operand) {
                     (OpCode::Mov, Operand::Register(_)) => {
-                        self.mov_register(instr, &mut out);
+                        self.mov_register(&instr, out_opt);
                     }
                     (OpCode::Cmp | OpCode::Add | OpCode::Sub, Operand::Register(_)) => {
-                        self.arithmetic_register(instr, &mut out);
+                        self.arithmetic_register(&instr, out_opt);
                     }
                     _ => panic!("unsupported OpCode {}", instr.op_code.format()),
+                }
+                self.ip += movs;
+                if (self.ip as usize) > self.instructions.len() {
+                    return;
                 }
             }
         }
@@ -1237,7 +1242,7 @@ fn main() {
         CliMode::Disasm => {
             let content_iter = content.iter().map(|it| *it);
             let instrucitons = process_binary(content_iter);
-            write_instructions(instrucitons, &mut std::io::stdout().lock());
+            write_instructions(instrucitons, &mut stdout);
         }
         CliMode::Exec => {
             use crate::simulator::execute;
