@@ -733,7 +733,7 @@ mod simulator {
         {
             let before = 0x80;
             let flags = execute_arithmetic_op(before, 0xF0, &ArithmeticOp::Add, false).1;
-            assert_eq!(flags, Flags::Carry);
+            assert_eq!(flags, Flags::Carry | Flags::Overflow);
         };
     }
 
