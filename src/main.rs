@@ -946,7 +946,6 @@ mod simulator {
                     (OpCode::Cmp | OpCode::Add | OpCode::Sub, Operand::Register(_)) => {
                         self.arithmetic_register(&instr, out_opt);
                     }
-
                     (
                         OpCode::Je
                         | OpCode::Jl
