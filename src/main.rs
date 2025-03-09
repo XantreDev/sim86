@@ -1,4 +1,4 @@
-use std::{io::Write, slice::Iter};
+use std::io::Write;
 
 mod structs;
 use structs::*;
@@ -13,9 +13,18 @@ impl Operand {
 }
 
 mod decoder {
-    use std::{slice::Iter, u8};
+    use std::u8;
 
     use super::structs::*;
+    struct ReadSize {
+        size: u8,
+    }
+
+    impl ReadSize {
+        fn zero() -> ReadSize {
+            ReadSize { size: 0 }
+        }
+    }
 
     fn decode_reg(reg: u8, w: u8) -> &'static Register {
         #[rustfmt::skip]
@@ -27,16 +36,16 @@ mod decoder {
         &W_TO_REG[usize::from(w) * 8 + usize::from(reg)]
     }
 
-    fn decode_address(content_iter: &mut Iter<u8>, _mod: u8, rm: u8) -> Operand {
+    fn decode_address<T: Iterator<Item = u8>>(content_iter: &mut T, _mod: u8, rm: u8) -> Operand {
         let is_direct_address = _mod == 0b00 && rm == 0b110;
         let displacement_bytes = if is_direct_address { 2 } else { _mod };
 
         let displacement_number: Option<i16> = match displacement_bytes {
             2 => Some(
-                (u16::from(*(content_iter.next().unwrap()))
-                    | (u16::from(*(content_iter.next().unwrap())) << 8)) as i16,
+                (u16::from((content_iter.next().unwrap()))
+                    | (u16::from((content_iter.next().unwrap())) << 8)) as i16,
             ),
-            1 => Some(i16::from(*(content_iter.next().unwrap()) as i8)),
+            1 => Some(i16::from((content_iter.next().unwrap()) as i8)),
             _ => None,
         };
 
@@ -74,9 +83,9 @@ mod decoder {
         Operand::Address(Some(*a_reg), *b_reg, displacement_number)
     }
 
-    fn rm_to_reg(
+    fn rm_to_reg<T: Iterator<Item = u8>>(
         op_code: OpCode,
-        content_iter: &mut Iter<u8>,
+        content_iter: &mut T,
         first: &u8,
         second: &u8,
     ) -> Instruction {
@@ -109,11 +118,11 @@ mod decoder {
         }
     }
 
-    fn immediate_to_rm(
+    fn immediate_to_rm<T: Iterator<Item = u8>>(
         op_code: OpCode,
         first: &u8,
         second: &u8,
-        content_iter: &mut Iter<u8>,
+        content_iter: &mut T,
         sign_extend: bool,
     ) -> Instruction {
         // let sign_extend = explicit_sign_extend.unwrap_or(false);
@@ -132,12 +141,12 @@ mod decoder {
 
         let immediate = {
             let mut init = 0;
-            init |= u16::from(*content_iter.next().unwrap());
+            init |= u16::from((content_iter.next().unwrap()));
 
             if wide == 0b1 && sign_extend && (init >> 7) & 0b1 == 1 {
                 init |= (u8::MAX as u16) << 8;
             } else if wide == 0b1 && !sign_extend {
-                init |= u16::from(*content_iter.next().unwrap()) << 8;
+                init |= u16::from((content_iter.next().unwrap())) << 8;
             }
 
             Operand::Immediate(init as i16)
@@ -168,14 +177,18 @@ mod decoder {
     //     }
     // }
 
-    fn mov_immediate_to_reg(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Instruction {
+    fn mov_immediate_to_reg<T: Iterator<Item = u8>>(
+        content_iter: &mut T,
+        first: &u8,
+        second: &u8,
+    ) -> Instruction {
         assert!(first >> 4 == 0b1011);
 
         let w = first >> 3 & 0b1;
         let reg = first & 0b111;
 
         let immediate: i16 = if w == 1 {
-            (u16::from(*(second)) | (u16::from(*(content_iter.next().unwrap())) << 8)) as i16
+            (u16::from(*(second)) | (u16::from((content_iter.next().unwrap())) << 8)) as i16
         } else {
             i16::from(*(second) as i8)
         };
@@ -195,13 +208,17 @@ mod decoder {
         }
     }
 
-    fn mov_acc(content_iter: &mut Iter<u8>, first: &u8, second: &u8) -> Instruction {
+    fn mov_acc<T: Iterator<Item = u8>>(
+        content_iter: &mut T,
+        first: &u8,
+        second: &u8,
+    ) -> Instruction {
         assert!(first >> 2 == 0b101000);
         let w = first & 0b1;
         let to_acc = (first >> 1 & 0b1) == 0;
 
         let displacement_number: i16 = if w == 1 {
-            (u16::from(*(second)) | (u16::from(*(content_iter.next().unwrap())) << 8)) as i16
+            (u16::from(*(second)) | (u16::from((content_iter.next().unwrap())) << 8)) as i16
         } else {
             i16::from(*(second) as i8)
         };
@@ -230,16 +247,16 @@ mod decoder {
         }
     }
 
-    fn im_to_acc(
+    fn im_to_acc<T: Iterator<Item = u8>>(
         op_code: OpCode,
-        content_iter: &mut Iter<u8>,
+        content_iter: &mut T,
         first: &u8,
         second: &u8,
     ) -> Instruction {
         let w = first & 0b1;
 
         let immediate: i16 = if w == 1 {
-            (u16::from(*(second)) | (u16::from(*(content_iter.next().unwrap())) << 8)) as i16
+            (u16::from(*(second)) | (u16::from((content_iter.next().unwrap())) << 8)) as i16
         } else {
             i16::from(*(second) as i8)
         };
@@ -323,7 +340,11 @@ mod decoder {
         }
     }
 
-    pub fn decode(first: &u8, second: &u8, content_iter: &mut Iter<u8>) -> Option<Instruction> {
+    pub fn decode<T: Iterator<Item = u8>>(
+        first: &u8,
+        second: &u8,
+        content_iter: &mut T,
+    ) -> Option<Instruction> {
         let get_arithmetic_op_code = |byte: &u8| match (byte >> 3) & 0b111 {
             0b000 => OpCode::Add,
             0b101 => OpCode::Sub,
@@ -392,19 +413,26 @@ mod decoder {
             _ => None,
         }
     }
-}
 
-fn process_binary(mut content_iter: Iter<u8>) -> Vec<Instruction> {
-    let mut result: Vec<Instruction> = vec![];
-    loop {
+    pub fn decode_instruction<T: Iterator<Item = u8>>(content_iter: &mut T) -> Option<Instruction> {
         let Some(first) = content_iter.next() else {
-            return result;
+            return None;
         };
         let second = content_iter.next().unwrap();
-        let Some(instruction) = decoder::decode(first, second, &mut content_iter) else {
+        let Some(instruction) = decode(&first, &second, content_iter) else {
             panic!("failed to decode {} {}", first, second)
         };
-        result.push(instruction);
+        Some(instruction)
+    }
+}
+
+fn process_binary<T: Iterator<Item = u8>>(mut content_iter: T) -> Vec<Instruction> {
+    let mut result: Vec<Instruction> = Vec::with_capacity(2048);
+    loop {
+        let Some(instr) = decoder::decode_instruction(&mut content_iter) else {
+            return result;
+        };
+        result.push(instr);
     }
 }
 
@@ -426,7 +454,8 @@ fn read_file<T: Into<String>>(file_path: T) -> Vec<u8> {
 
 mod simulator {
     use crate::{
-        format::Formattable, Instruction, InstructionFlags, IsWide, OpCode, Operand, Register,
+        decoder, format::Formattable, Instruction, InstructionFlags, IsWide, OpCode, Operand,
+        Register,
     };
     use bitflags::bitflags;
     use std::io::Write;
@@ -444,8 +473,12 @@ mod simulator {
         // di - (14 - 16)
         arr: [u8; 8192],
 
+        instructions: Vec<u8>,
+        ip: u16,
+
         flags: Flags,
     }
+
     static start_of_memory: usize = 8;
 
     bitflags! {
@@ -756,7 +789,58 @@ mod simulator {
         (reg_value, flags)
     }
 
+    struct CountingIter<'a> {
+        data: &'a Vec<u8>,
+        start_idx: u16,
+        movs: u16,
+    }
+
+    impl<'a> Iterator for CountingIter<'a> {
+        type Item = &'a u8;
+        fn next(&mut self) -> Option<Self::Item> {
+            let next_idx = (self.start_idx + self.movs) as usize;
+            if next_idx >= self.data.len() {
+                None
+            } else {
+                let res = &self.data[next_idx];
+                self.movs += 1;
+                Some(res)
+            }
+        }
+    }
+
     impl X86Memory {
+        fn from(instructions: Vec<u8>) -> X86Memory {
+            X86Memory {
+                arr: core::array::from_fn(|_| 0u8),
+                instructions,
+                ip: 0,
+                flags: Flags::empty(),
+            }
+        }
+
+        fn run<T: Write>(&mut self, out_opt: &mut Option<&mut T>) {
+            loop {
+                let iter = CountingIter {
+                    data: &self.instructions,
+                    start_idx: self.ip,
+                    movs: 0,
+                };
+                let Some(instr) = decoder::decode_instruction(&mut iter) else {
+                    return;
+                };
+                |instr| match (&instr.op_code, instr.left_operand) {
+                    (OpCode::Mov, Operand::Register(_)) => {
+                        self.mov_register(instr, &mut out);
+                    }
+                    (OpCode::Cmp | OpCode::Add | OpCode::Sub, Operand::Register(_)) => {
+                        self.arithmetic_register(instr, &mut out);
+                    }
+                    _ => panic!("unsupported OpCode {}", instr.op_code.format()),
+                }
+            }
+        }
+
         fn get_word_value(&self, reg: &Register) -> u16 {
             #[cfg(debug_assertions)]
             assert!(reg.reg_type() == RegType::Word);
@@ -947,22 +1031,9 @@ mod simulator {
         }
     }
 
-    pub fn execute<T: Write>(instructions: Vec<Instruction>, mut out: Option<&mut T>) {
-        let mut memory = X86Memory {
-            arr: core::array::from_fn(|_| 0u8),
-            flags: Flags::empty(),
-        };
-        instructions
-            .iter()
-            .for_each(|instr| match (&instr.op_code, instr.left_operand) {
-                (OpCode::Mov, Operand::Register(_)) => {
-                    memory.mov_register(instr, &mut out);
-                }
-                (OpCode::Cmp | OpCode::Add | OpCode::Sub, Operand::Register(_)) => {
-                    memory.arithmetic_register(instr, &mut out);
-                }
-                _ => panic!("unsupported OpCode {}", instr.op_code.format()),
-            });
+    pub fn execute<T: Write>(instructions: Vec<u8>, mut out: Option<&mut T>) {
+        let mut memory = X86Memory::from(instructions);
+        memory.run(&mut out);
         (&mut out).if_some_ref_mut(|out| {
             writeln!(out, "\nFinal registers: ").unwrap();
             memory.print_registers(out);
@@ -1155,8 +1226,6 @@ fn main() {
     };
 
     let content = read_file(path);
-    let content_iter = content.iter();
-    let instrucitons = process_binary(content_iter);
     #[cfg(target_endian = "big")]
     println!("This is a BigEndian system");
 
@@ -1166,11 +1235,13 @@ fn main() {
     let mut stdout = &mut std::io::stdout().lock();
     match mode {
         CliMode::Disasm => {
+            let content_iter = content.iter().map(|it| *it);
+            let instrucitons = process_binary(content_iter);
             write_instructions(instrucitons, &mut std::io::stdout().lock());
         }
         CliMode::Exec => {
             use crate::simulator::execute;
-            execute(instrucitons, Some(stdout));
+            execute(content, Some(stdout));
         }
     }
 }
@@ -1213,7 +1284,7 @@ mod tests {
             let mut res: Vec<u8> = Vec::new();
             println!("checking '{}'", file_path);
 
-            write_instructions(process_binary(file.iter()), &mut res);
+            write_instructions(process_binary(file.iter().map(|it| *it)), &mut res);
 
             if !Path::new("./.test").exists() {
                 create_dir("./.test").unwrap();
@@ -1251,7 +1322,7 @@ mod tests {
             let mut res: Vec<u8> = Vec::new();
             println!("evaluating '{}'", file_path);
 
-            execute(process_binary(file.iter()), Some(&mut res));
+            execute(file, Some(&mut res));
             insta::assert_snapshot!(str::from_utf8(res.as_slice()).unwrap());
         }
     }
