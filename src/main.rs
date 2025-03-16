@@ -16,15 +16,6 @@ mod decoder {
     use std::u8;
 
     use super::structs::*;
-    struct ReadSize {
-        size: u8,
-    }
-
-    impl ReadSize {
-        fn zero() -> ReadSize {
-            ReadSize { size: 0 }
-        }
-    }
 
     fn decode_reg(reg: u8, w: u8) -> &'static Register {
         #[rustfmt::skip]
