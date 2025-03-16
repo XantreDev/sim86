@@ -1,0 +1,47 @@
+---
+source: src/main.rs
+expression: "str::from_utf8(res.as_slice()).unwrap()"
+snapshot_kind: text
+---
+mov ax, 10 ; ax 0x0000 -> 0x000a
+mov bx, 10 ; bx 0x0000 -> 0x000a
+mov cx, 10 ; cx 0x0000 -> 0x000a
+cmp bx, cx ; flags: None -> PZ
+je $+7+0 ; ip 0x0010 -> 0x0012
+sub bx, 5 ; bx 0x000a -> 0x0005 flags: PZ -> P
+jb $+5+0 ; ip 0x0015 -> 0x0017
+sub cx, 2 ; cx 0x000a -> 0x0008 flags: P -> None
+loopnz $-17+0 ; cx 0x0008 -> 0x0007 ip 0x0007 -> 0x0009
+cmp bx, cx ; flags: None -> CAS
+je $+7+0 ; ip 0x000b -> 0x000d
+add ax, 1 ; ax 0x000a -> 0x000b flags: CAS -> None
+jp $+7+0 ; ip 0x0010 -> 0x0012
+sub bx, 5 ; bx 0x0005 -> 0x0000 flags: None -> PZ
+jb $+5+0 ; ip 0x0015 -> 0x0017
+sub cx, 2 ; cx 0x0007 -> 0x0005 flags: PZ -> P
+loopnz $-17+0 ; cx 0x0005 -> 0x0004 ip 0x0007 -> 0x0009
+cmp bx, cx ; flags: P -> CPAS
+je $+7+0 ; ip 0x000b -> 0x000d
+add ax, 1 ; ax 0x000b -> 0x000c flags: CPAS -> P
+jp $+7+0 ; ip 0x0015 -> 0x0017
+sub cx, 2 ; cx 0x0004 -> 0x0002 flags: P -> None
+loopnz $-17+0 ; cx 0x0002 -> 0x0001 ip 0x0007 -> 0x0009
+cmp bx, cx ; flags: None -> CPAS
+je $+7+0 ; ip 0x000b -> 0x000d
+add ax, 1 ; ax 0x000c -> 0x000d flags: CPAS -> None
+jp $+7+0 ; ip 0x0010 -> 0x0012
+sub bx, 5 ; bx 0x0000 -> 0xfffb flags: None -> CAS
+jb $+5+0 ; ip 0x0018 -> 0x001a
+loopnz $-17+0 ; cx 0x0001 -> 0x0000 ip 0x001a -> 0x001c
+
+Final registers: 
+ax 0x000d (13)
+bx 0xfffb (65531)
+cx 0x0000 (0)
+dx 0x0000 (0)
+sp 0x0000 (0)
+bp 0x0000 (0)
+si 0x0000 (0)
+di 0x0000 (0)
+ip: 0x001c (28)
+flags: CAS

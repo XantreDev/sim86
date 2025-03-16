@@ -16,15 +16,6 @@ mod decoder {
     use std::u8;
 
     use super::structs::*;
-    struct ReadSize {
-        size: u8,
-    }
-
-    impl ReadSize {
-        fn zero() -> ReadSize {
-            ReadSize { size: 0 }
-        }
-    }
 
     fn decode_reg(reg: u8, w: u8) -> &'static Register {
         #[rustfmt::skip]
@@ -458,7 +449,7 @@ mod simulator {
         Register,
     };
     use bitflags::bitflags;
-    use std::io::Write;
+    use std::{io::Write, ops::Not};
 
     struct X86Memory {
         // most of a X86 and ARM processors are little endian, so I will use
@@ -567,6 +558,12 @@ mod simulator {
         fn as_register(self) -> Option<Register> {
             match self {
                 Operand::Register(reg) => Some(reg),
+                _ => None,
+            }
+        }
+        fn as_displacement(self) -> Option<i8> {
+            match self {
+                Operand::JumpDisplacement(displ) => Some(displ),
                 _ => None,
             }
         }
@@ -809,6 +806,10 @@ mod simulator {
         }
     }
 
+    fn print_flags(prev_flags: &Flags, next_flags: &Flags) -> String {
+        format!("flags: {} -> {}", prev_flags.format(), next_flags.format())
+    }
+
     impl X86Memory {
         fn from(instructions: Vec<u8>) -> X86Memory {
             X86Memory {
@@ -817,6 +818,105 @@ mod simulator {
                 ip: 0,
                 flags: Flags::empty(),
             }
+        }
+
+        fn process_jump<T: Write>(
+            &self,
+            instruction: &Instruction,
+            out_opt: &mut Option<&mut T>,
+        ) -> Option<i8> {
+            let displacement = instruction.left_operand.as_displacement();
+            out_opt.if_some_ref_mut(|out| {
+                write!(out, "{} ; ", instruction.format()).expect("should write");
+            });
+            assert!(displacement.is_some());
+            match instruction.op_code {
+                OpCode::Je if (self.flags.contains(Flags::Zero)) => displacement,
+
+                OpCode::Jl
+                    if (self.flags.contains(Flags::Sign)
+                        != self.flags.contains(Flags::Overflow)) =>
+                {
+                    displacement
+                }
+                OpCode::Jle
+                    if (self.flags.contains(Flags::Sign)
+                        != self.flags.contains(Flags::Overflow)
+                        || self.flags.contains(Flags::Zero)) =>
+                {
+                    displacement
+                }
+                OpCode::Jb if (self.flags.contains(Flags::Carry)) => displacement,
+                OpCode::Jbe
+                    if (self.flags.contains(Flags::Carry) || self.flags.contains(Flags::Zero)) =>
+                {
+                    displacement
+                }
+                OpCode::Jp if (self.flags.contains(Flags::Parity)) => displacement,
+                OpCode::Jo if (self.flags.contains(Flags::Overflow)) => displacement,
+                OpCode::Js if (self.flags.contains(Flags::Sign)) => displacement,
+                OpCode::Jne if (self.flags.not().contains(Flags::Zero)) => displacement,
+                OpCode::Jnl
+                    if (self.flags.contains(Flags::Sign)
+                        == self.flags.contains(Flags::Overflow)) =>
+                {
+                    displacement
+                }
+                OpCode::Jnle
+                    if (self.flags.contains(Flags::Sign)
+                        == self.flags.contains(Flags::Overflow)
+                        && self.flags.not().contains(Flags::Zero)) =>
+                {
+                    displacement
+                }
+
+                OpCode::Jnb if (self.flags.not().contains(Flags::Carry)) => displacement,
+
+                OpCode::Jnbe if (self.flags.not().intersects(Flags::Carry | Flags::Zero)) => {
+                    displacement
+                }
+                OpCode::Jnp if (self.flags.not().contains(Flags::Parity)) => displacement,
+                OpCode::Jno if (self.flags.not().contains(Flags::Overflow)) => displacement,
+                OpCode::Jns if (self.flags.not().contains(Flags::Sign)) => displacement,
+                OpCode::Jcxz if (self.get_value(&Register::Cx) == 0) => displacement,
+
+                _ => None,
+            }
+        }
+        fn process_loop<T: Write>(
+            &mut self,
+            instruction: &Instruction,
+            out_opt: &mut Option<&mut T>,
+        ) -> Option<i8> {
+            let displacement = instruction.left_operand.as_displacement();
+            assert!(displacement.is_some());
+
+            let prev_cx = self.get_word_value(&Register::Cx);
+            let (next_cx, flags) = execute_arithmetic_op(prev_cx, 1, &ArithmeticOp::Sub, true);
+
+            out_opt.if_some_ref_mut(|out| {
+                write!(
+                    out,
+                    "{} ; cx {:#06x} -> {:#06x} ",
+                    instruction.format(),
+                    prev_cx,
+                    next_cx,
+                )
+                .expect("write is fine");
+            });
+
+            self.write_value(&Register::Cx, next_cx);
+            // it doesn't affect the flags
+            // self.flags = flags;
+
+            return match instruction.op_code {
+                OpCode::Loop if (next_cx != 0) => displacement,
+                OpCode::Loopz if (next_cx != 0 && self.flags.contains(Flags::Zero)) => displacement,
+                OpCode::Loopnz if (next_cx != 0 && self.flags.not().contains(Flags::Zero)) => {
+                    displacement
+                }
+                _ => None,
+            };
         }
 
         fn run<T: Write>(&mut self, out_opt: &mut Option<&mut T>) {
@@ -836,6 +936,64 @@ mod simulator {
                     }
                     (OpCode::Cmp | OpCode::Add | OpCode::Sub, Operand::Register(_)) => {
                         self.arithmetic_register(&instr, out_opt);
+                    }
+
+                    (
+                        OpCode::Je
+                        | OpCode::Jl
+                        | OpCode::Jle
+                        | OpCode::Jb
+                        | OpCode::Jbe
+                        | OpCode::Jp
+                        | OpCode::Jo
+                        | OpCode::Js
+                        | OpCode::Jne
+                        | OpCode::Jnl
+                        | OpCode::Jnle
+                        | OpCode::Jnb
+                        | OpCode::Jnbe
+                        | OpCode::Jnp
+                        | OpCode::Jno
+                        | OpCode::Jns
+                        | OpCode::Jcxz,
+                        _,
+                    ) => {
+                        let displacement = self.process_jump(&instr, out_opt);
+                        match displacement {
+                            Some(it) => {
+                                let next_ip = if it >= 0 {
+                                    self.ip + (it as u16)
+                                } else {
+                                    self.ip - (it.abs() as u16)
+                                };
+                                self.ip = next_ip;
+                            }
+                            None => {}
+                        }
+
+                        out_opt.if_some_ref_mut(|out| {
+                            writeln!(out, "ip {:#06x} -> {:#06x}", self.ip, self.ip + movs)
+                                .expect("should write");
+                        });
+                    }
+                    (OpCode::Loop | OpCode::Loopz | OpCode::Loopnz, _) => {
+                        let displacement = self.process_loop(&instr, out_opt);
+                        match displacement {
+                            Some(it) => {
+                                let next_ip = if it >= 0 {
+                                    self.ip + (it as u16)
+                                } else {
+                                    self.ip - (it.abs() as u16)
+                                };
+                                self.ip = next_ip;
+                            }
+                            None => {}
+                        }
+
+                        out_opt.if_some_ref_mut(|out| {
+                            writeln!(out, "ip {:#06x} -> {:#06x}", self.ip, self.ip + movs)
+                                .expect("should write");
+                        });
                     }
                     _ => panic!("unsupported OpCode {}", instr.op_code.format()),
                 }
@@ -942,8 +1100,7 @@ mod simulator {
                         .expect("write is ok");
                 }
 
-                writeln!(out, "flags: {} -> {}", self.flags.format(), flags.format())
-                    .expect("write is fine");
+                writeln!(out, "{}", print_flags(&self.flags, &flags)).expect("write is fine");
             });
 
             self.flags = flags;
@@ -1033,6 +1190,9 @@ mod simulator {
 
                 writeln!(out, "{} {:#06x} ({})", reg.format(), value, value).unwrap();
             });
+
+            writeln!(out, "ip: {:#06x} ({})", self.ip, self.ip).unwrap();
+            writeln!(out, "flags: {}", self.flags.format()).unwrap();
         }
     }
 
@@ -1318,6 +1478,9 @@ mod tests {
             "./input/listing_0044_register_movs_extended",
             "./input/listing_0046_add_sub_cmp",
             "./input/listing_0047_challenge_flags",
+            "./input/listing_0048_ip_register",
+            "./input/listing_0049_conditional_jumps",
+            "./input/listing_0050_challenge_jumps",
         ];
         let force_recompilation = std::env::var("RECOMPILE").map_or(false, |it| it == "true");
 
