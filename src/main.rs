@@ -919,7 +919,7 @@ mod simulator {
             };
         }
 
-        fn address_of_operand(&self, operand: &Operand) -> Option<u32> {
+        fn address_of_operand(&self, operand: &Operand) -> Option<usize> {
             match operand {
                 Operand::Address(reg1, reg2, displ) => {
                     let a = reg1.map(|it| self.get_reg(&it)).unwrap_or(0);
@@ -928,7 +928,7 @@ mod simulator {
 
                     let address = (a as i32) + (b as i32) + (c as i32);
 
-                    return Some((address as u32) + (start_of_memory as u32));
+                    return Some((address as usize) + (start_of_memory as usize));
                 }
                 _ => None,
             }
@@ -1087,7 +1087,16 @@ mod simulator {
             let right_value = match right {
                 Operand::Immediate(value) => value as u16,
                 Operand::Register(right_reg) => self.get_reg(&right_reg),
-                _ => panic!("invariant arithm r_val"),
+                Operand::Address(_, _, _) => {
+                    let address = self.address_of_operand(&right).expect("should be address");
+
+                    if left_reg.is_wide() {
+                        self.arr.read_as_u16(address)
+                    } else {
+                        self.arr[address] as u16
+                    }
+                }
+                _ => panic!("invariant arithm r_val {:#?}", right),
             };
 
             let (next_value, flags) =
@@ -1203,7 +1212,7 @@ mod simulator {
             // };
             let address = self
                 .address_of_operand(&instruction.left_operand)
-                .expect("address must exist") as usize;
+                .expect("address must exist");
 
             match instruction.right_operand {
                 Operand::Register(reg) => {
@@ -1581,6 +1590,8 @@ mod tests {
             "./input/listing_0049_conditional_jumps",
             "./input/listing_0050_challenge_jumps",
             "./input/listing_0051_memory_mov",
+            "./input/listing_0052_memory_add_loop",
+            "./input/listing_0053_add_loop_challenge",
         ];
         let force_recompilation = std::env::var("RECOMPILE").map_or(false, |it| it == "true");
 
