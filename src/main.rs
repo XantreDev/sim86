@@ -462,7 +462,7 @@ mod simulator {
         // bp - (10 - 12)
         // si - (12 - 14)
         // di - (14 - 16)
-        arr: [u8; 8192],
+        arr: [u8; 65552],
 
         instructions: Vec<u8>,
         ip: u16,
@@ -878,7 +878,7 @@ mod simulator {
                 OpCode::Jnp if (self.flags.not().contains(Flags::Parity)) => displacement,
                 OpCode::Jno if (self.flags.not().contains(Flags::Overflow)) => displacement,
                 OpCode::Jns if (self.flags.not().contains(Flags::Sign)) => displacement,
-                OpCode::Jcxz if (self.get_value(&Register::Cx) == 0) => displacement,
+                OpCode::Jcxz if (self.get_reg(&Register::Cx) == 0) => displacement,
 
                 _ => None,
             }
@@ -891,7 +891,7 @@ mod simulator {
             let displacement = instruction.left_operand.as_displacement();
             assert!(displacement.is_some());
 
-            let prev_cx = self.get_word_value(&Register::Cx);
+            let prev_cx = self.get_reg(&Register::Cx);
             let (next_cx, flags) = execute_arithmetic_op(prev_cx, 1, &ArithmeticOp::Sub, true);
 
             out_opt.if_some_ref_mut(|out| {
@@ -905,18 +905,33 @@ mod simulator {
                 .expect("write is fine");
             });
 
-            self.write_value(&Register::Cx, next_cx);
+            self.arr.write_as_u16(Register::Cx.to_byte_index(), next_cx);
             // it doesn't affect the flags
             // self.flags = flags;
 
             return match instruction.op_code {
                 OpCode::Loop if (next_cx != 0) => displacement,
-                OpCode::Loopz if (next_cx != 0 && self.flags.contains(Flags::Zero)) => displacement,
-                OpCode::Loopnz if (next_cx != 0 && self.flags.not().contains(Flags::Zero)) => {
+                OpCode::Loopz if (next_cx != 0 && flags.contains(Flags::Zero)) => displacement,
+                OpCode::Loopnz if (next_cx != 0 && flags.not().contains(Flags::Zero)) => {
                     displacement
                 }
                 _ => None,
             };
+        }
+
+        fn address_of_operand(&self, operand: &Operand) -> Option<u32> {
+            match operand {
+                Operand::Address(reg1, reg2, displ) => {
+                    let a = reg1.map(|it| self.get_reg(&it)).unwrap_or(0);
+                    let b = reg2.map(|it| self.get_reg(&it)).unwrap_or(0);
+                    let c = displ.unwrap_or(0);
+
+                    let address = (a as i32) + (b as i32) + (c as i32);
+
+                    return Some((address as u32) + (start_of_memory as u32));
+                }
+                _ => None,
+            }
         }
 
         fn run<T: Write>(&mut self, out_opt: &mut Option<&mut T>) {
@@ -933,6 +948,9 @@ mod simulator {
                 match (&instr.op_code, instr.left_operand) {
                     (OpCode::Mov, Operand::Register(_)) => {
                         self.mov_register(&instr, out_opt);
+                    }
+                    (OpCode::Mov, Operand::Address(_, _, _)) => {
+                        self.process_store(&instr, out_opt);
                     }
                     (OpCode::Cmp | OpCode::Add | OpCode::Sub, Operand::Register(_)) => {
                         self.arithmetic_register(&instr, out_opt);
@@ -1003,46 +1021,28 @@ mod simulator {
             }
         }
 
-        fn get_word_value(&self, reg: &Register) -> u16 {
-            #[cfg(debug_assertions)]
-            assert!(reg.reg_type() == RegType::Word);
-
-            if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
-                self.arr.as_u16_ref()[reg.to_word_index()]
-            } else {
-                (self.arr[reg.to_byte_index()] as u16)
-                    | (self.arr[reg.to_byte_index() + 1] as u16) << 8
-            }
-        }
-        fn get_value(&self, reg: &Register) -> u16 {
-            if (reg.is_wide()) {
-                self.get_word_value(reg)
+        fn get_reg(&self, reg: &Register) -> u16 {
+            if reg.is_wide() {
+                self.arr.read_as_u16(reg.to_byte_index())
             } else {
                 self.arr[reg.to_byte_index()] as u16
             }
         }
-        fn write_word_value(&mut self, reg: &Register, value: u16) {
+        fn set_word_reg(&mut self, reg: &Register, value: u16) {
             #[cfg(debug_assertions)]
             assert!(reg.reg_type() == RegType::Word);
-
-            if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
-                self.arr.as_u16_ref_mut()[reg.to_word_index()] = value;
-            } else {
-                self.arr[reg.to_byte_index()] = (value & 0x00FF) as u8;
-                self.arr[reg.to_byte_index() + 1] = ((value & 0xFF00) >> 8) as u8;
-            }
         }
-        fn write_byte_value(&mut self, reg: &Register, value: u8) {
+        fn set_byte_reg(&mut self, reg: &Register, value: u8) {
             #[cfg(debug_assertions)]
             assert!(reg.reg_type() != RegType::Word);
             self.arr[reg.to_byte_index()] = value;
         }
 
-        fn write_value(&mut self, reg: &Register, value: u16) {
+        fn set_reg(&mut self, reg: &Register, value: u16) {
             if reg.is_wide() {
-                self.write_word_value(reg, value);
+                self.arr.write_as_u16(reg.to_byte_index(), value);
             } else {
-                self.write_byte_value(reg, value as u8);
+                self.set_byte_reg(reg, value as u8);
             }
         }
 
@@ -1072,7 +1072,7 @@ mod simulator {
 
             out_opt.if_some_ref_mut(|out| {
                 let word_reg = left_reg.to_word();
-                let prev_value = self.get_word_value(&word_reg);
+                let prev_value = self.get_reg(&word_reg);
 
                 out.write(format!("{} ; ", instruction.format(),).as_bytes())
                     .expect("is ok");
@@ -1083,10 +1083,10 @@ mod simulator {
                 }
             });
 
-            let left_value = self.get_value(&left_reg);
+            let left_value = self.get_reg(&left_reg);
             let right_value = match right {
                 Operand::Immediate(value) => value as u16,
-                Operand::Register(right_reg) => self.get_value(&right_reg),
+                Operand::Register(right_reg) => self.get_reg(&right_reg),
                 _ => panic!("invariant arithm r_val"),
             };
 
@@ -1103,7 +1103,11 @@ mod simulator {
             });
 
             self.flags = flags;
-            self.write_value(&left_reg, next_value);
+            if left_reg.is_wide() {
+                self.arr.write_as_u16(left_reg.to_byte_index(), next_value);
+            } else {
+                self.arr[left_reg.to_byte_index()] = next_value as u8;
+            }
         }
 
         fn mov_register<T: Write>(
@@ -1121,7 +1125,7 @@ mod simulator {
             assert_eq!(flags.contains(InstructionFlags::Wide), is_wide);
             out_opt.if_some_ref_mut(|out| {
                 let word_reg = to_reg.to_word();
-                let prev_value = self.get_word_value(&word_reg);
+                let prev_value = self.get_reg(&word_reg);
 
                 out.write(
                     format!(
@@ -1138,10 +1142,19 @@ mod simulator {
             if is_wide {
                 match &operand {
                     Operand::Register(from_reg) => {
-                        self.write_word_value(to_reg, self.get_word_value(from_reg));
+                        let value = self.arr.read_as_u16(from_reg.to_byte_index());
+                        self.arr.write_as_u16(to_reg.to_byte_index(), value);
                     }
                     Operand::Immediate(data) => {
-                        self.write_word_value(to_reg, *data as u16);
+                        self.arr.write_as_u16(to_reg.to_byte_index(), *data as u16);
+                    }
+                    Operand::Address(_, _, _) => {
+                        let Some(address) = self.address_of_operand(&operand) else {
+                            panic!("invariant");
+                        };
+
+                        let value = self.arr.read_as_u16(address as usize);
+                        self.arr.write_as_u16(to_reg.to_byte_index(), value);
                     }
                     _ => panic!("unexpected operand {}", operand.format()),
                 }
@@ -1159,17 +1172,80 @@ mod simulator {
 
                         self.arr[to_reg.to_byte_index()] = (*data) as u8;
                     }
+                    Operand::Address(_, _, _) => {
+                        let Some(address) = self.address_of_operand(&operand) else {
+                            panic!("invariant");
+                        };
+
+                        let value = self.arr[address as usize];
+                        self.arr[to_reg.to_byte_index()] = value;
+                    }
                     _ => panic!("unexpected operand {}", operand.format()),
                 }
             }
 
             out_opt.if_some_ref_mut(|out| {
                 let word_reg = to_reg.to_word();
-                let next_value = self.get_word_value(&word_reg);
+                let next_value = self.get_reg(&word_reg);
 
                 out.write(format!("{:#06x}\n", next_value).as_bytes())
                     .expect("is ok");
             });
+        }
+
+        fn process_store<T: Write>(
+            &mut self,
+            instruction: &Instruction,
+            out_opt: &mut Option<&mut T>,
+        ) {
+            // let Operand::Register(reg) = instruction.right_operand else {
+            //     panic!("invariant op ${:?}", instruction.right_operand);
+            // };
+            let address = self
+                .address_of_operand(&instruction.left_operand)
+                .expect("address must exist") as usize;
+
+            match instruction.right_operand {
+                Operand::Register(reg) => {
+                    let value = self.get_reg(&reg);
+                    out_opt.if_some_ref_mut(|out| {
+                        writeln!(
+                            out,
+                            "{} ; {:#06x} -> ({:#06x})",
+                            instruction.format(),
+                            value,
+                            address
+                        )
+                        .expect("store should write");
+                    });
+                    if reg.is_wide() {
+                        let value = self.arr.read_as_u16(reg.to_byte_index());
+
+                        self.arr.write_as_u16(address, value);
+                    } else {
+                        self.arr[address] = self.arr[reg.to_byte_index()];
+                    }
+                }
+                Operand::Immediate(value) => {
+                    out_opt.if_some_ref_mut(|out| {
+                        writeln!(
+                            out,
+                            "{} ; {:#06x} -> ({:#06x})",
+                            instruction.format(),
+                            value,
+                            address
+                        )
+                        .expect("store should write");
+                    });
+
+                    if instruction.flags.contains(InstructionFlags::Wide) {
+                        self.arr.write_as_u16(address, value as u16);
+                    } else {
+                        self.arr[address] = value as u8;
+                    }
+                }
+                _ => panic!("invariant {:#?}", instruction),
+            }
         }
 
         fn print_registers<T: Write>(&self, out: &mut T) {
@@ -1185,7 +1261,7 @@ mod simulator {
             ];
 
             registers.iter().for_each(|reg| {
-                let value = self.get_word_value(reg);
+                let value = self.get_reg(reg);
 
                 writeln!(out, "{} {:#06x} ({})", reg.format(), value, value).unwrap();
             });
@@ -1274,30 +1350,30 @@ mod simulator {
             }
         }
 
-        fn to_word_index(&self) -> usize {
-            match self {
-                Register::Ax => 0,
-                Register::Ah => 0,
-                Register::Al => 0,
+        // fn to_word_index(&self) -> usize {
+        //     match self {
+        //         Register::Ax => 0,
+        //         Register::Ah => 0,
+        //         Register::Al => 0,
 
-                Register::Bx => 1,
-                Register::Bh => 1,
-                Register::Bl => 1,
+        //         Register::Bx => 1,
+        //         Register::Bh => 1,
+        //         Register::Bl => 1,
 
-                Register::Cx => 2,
-                Register::Ch => 2,
-                Register::Cl => 2,
+        //         Register::Cx => 2,
+        //         Register::Ch => 2,
+        //         Register::Cl => 2,
 
-                Register::Dx => 3,
-                Register::Dh => 3,
-                Register::Dl => 3,
+        //         Register::Dx => 3,
+        //         Register::Dh => 3,
+        //         Register::Dl => 3,
 
-                Register::Sp => 4,
-                Register::Bp => 5,
-                Register::Si => 6,
-                Register::Di => 7,
-            }
-        }
+        //         Register::Sp => 4,
+        //         Register::Bp => 5,
+        //         Register::Si => 6,
+        //         Register::Di => 7,
+        //     }
+        // }
 
         // little endian encoding
         fn to_byte_index(&self) -> usize {
@@ -1348,6 +1424,8 @@ mod simulator {
     trait AsU16 {
         fn as_u16_ref(&self) -> &[u16];
         fn as_u16_ref_mut(&mut self) -> &mut [u16];
+        fn read_as_u16(&self, index: usize) -> u16;
+        fn write_as_u16(&mut self, index: usize, value: u16);
     }
 
     impl AsU16 for [u8] {
@@ -1361,6 +1439,28 @@ mod simulator {
             let size = size_of_val(self);
 
             unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr().cast::<u16>(), size) }
+        }
+        fn read_as_u16(&self, index: usize) -> u16 {
+            assert!(self.len() > index + 1);
+
+            if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
+                unsafe { self.as_ptr().byte_add(index).cast::<u16>().read() }
+            } else {
+                let lower = self[index] as u16;
+                let upper = self[index + 1] as u16;
+
+                (lower) | (upper << 8)
+            }
+        }
+        fn write_as_u16(&mut self, index: usize, value: u16) {
+            assert!(self.len() > index + 1);
+
+            if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
+                unsafe { self.as_mut_ptr().byte_add(index).cast::<u16>().write(value) }
+            } else {
+                self[index] = (value & 0x00FF) as u8;
+                self[index + 1] = ((value & 0xFF00) >> 8) as u8;
+            }
         }
     }
 }
@@ -1480,6 +1580,7 @@ mod tests {
             "./input/listing_0048_ip_register",
             "./input/listing_0049_conditional_jumps",
             "./input/listing_0050_challenge_jumps",
+            "./input/listing_0051_memory_mov",
         ];
         let force_recompilation = std::env::var("RECOMPILE").map_or(false, |it| it == "true");
 
