@@ -98,6 +98,7 @@ impl OpCode {
     }
 }
 
+#[derive(Debug)]
 pub struct Instruction {
     pub op_code: OpCode,
     pub flags: InstructionFlags,

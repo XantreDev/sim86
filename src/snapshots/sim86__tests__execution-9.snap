@@ -1,0 +1,27 @@
+---
+source: src/main.rs
+expression: "str::from_utf8(res.as_slice()).unwrap()"
+snapshot_kind: text
+---
+mov [1000], word 1 ; 0x0001 -> (0x03f0)
+mov [1002], word 2 ; 0x0002 -> (0x03f2)
+mov [1004], word 3 ; 0x0003 -> (0x03f4)
+mov [1006], word 4 ; 0x0004 -> (0x03f6)
+mov bx, 1000 ; bx 0x0000 -> 0x03e8
+mov [bx+4], word 10 ; 0x000a -> (0x03f4)
+mov bx, [1000] ; bx 0x03e8 -> 0x0001
+mov cx, [1002] ; cx 0x0000 -> 0x0002
+mov dx, [1004] ; dx 0x0000 -> 0x000a
+mov bp, [1006] ; bp 0x0000 -> 0x0004
+
+Final registers: 
+ax 0x0000 (0)
+bx 0x0001 (1)
+cx 0x0002 (2)
+dx 0x000a (10)
+sp 0x0000 (0)
+bp 0x0004 (4)
+si 0x0000 (0)
+di 0x0000 (0)
+ip: 0x0030 (48)
+flags: None
