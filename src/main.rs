@@ -1592,6 +1592,8 @@ mod tests {
             "./input/listing_0051_memory_mov",
             "./input/listing_0052_memory_add_loop",
             "./input/listing_0053_add_loop_challenge",
+            "./input/listing_0054_draw_rectangle",
+            "./input/listing_0055_challenge_rectangle",
         ];
         let force_recompilation = std::env::var("RECOMPILE").map_or(false, |it| it == "true");
 
