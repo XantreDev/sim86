@@ -1,6 +1,8 @@
 use crate::{
-    decoder, estimation::Architecture, format::Formattable, Instruction, InstructionFlags, IsWide,
-    OpCode, Operand, Register,
+    decoder,
+    estimation::{self, estimate_cycles_of, Architecture},
+    format::Formattable,
+    Instruction, InstructionFlags, IsWide, OpCode, Operand, Register,
 };
 use bitflags::bitflags;
 use std::{io::Write, ops::Not};
@@ -34,8 +36,6 @@ pub struct Simulator {
     ip: u16,
 
     flags: Flags,
-
-    config: SimulatorConfig,
 }
 
 const START_OF_MEMORY: usize = 8;
@@ -511,7 +511,6 @@ impl Simulator {
             instructions,
             ip: 0,
             flags: Flags::empty(),
-            config: config,
         }
     }
 
@@ -623,7 +622,7 @@ impl Simulator {
         }
     }
 
-    fn run<T: Write>(&mut self, out_opt: &mut Option<&mut T>) {
+    fn run<T: Write>(&mut self, out_opt: &mut Option<&mut T>, config: &SimulatorConfig) {
         loop {
             let mut iter = CountingIter {
                 data: &self.instructions,
@@ -634,20 +633,67 @@ impl Simulator {
                 break;
             };
             let movs = iter.movs;
+            let cycle_estimation_mode = config.cycle_estimation_mode.as_ref();
+
             match (&instr.op_code, instr.left_operand) {
                 (OpCode::Mov, Operand::Register(_)) => {
                     let meta = self.mov_register(&instr);
                     let _mutation = meta.mutation.expect("mov mutates");
                     let mutation = _mutation.as_register_unsafe();
 
+                    let estimation_opt =
+                        cycle_estimation_mode.map(|arch| (arch, estimate_cycles_of(&instr)));
+
                     out_opt.if_some_ref_mut(|out| {
+                        let estimation_str = estimation_opt.map(|(arch, estimation)| {
+                            use crate::estimation::TransferAddress;
+                            let is_word = instr.flags.contains(InstructionFlags::Wide);
+
+                            let mut res = String::with_capacity(10);
+
+                            if estimation.base > 0 {
+                                res.push_str(estimation.base.to_string().as_str());
+                            }
+                            if estimation.eac > 0 {
+                                if res.len() > 0 {
+                                    res.push(' ')
+                                }
+                                res.push_str(format!("{}ea", estimation.eac).as_str());
+                            }
+                            if estimation.transfers > 0 {
+                                let operand = meta
+                                    .resolved_memory_operand
+                                    .expect("if has transfers memory operand must be resolved");
+                                let transfer_tax = estimation.estimate_trasfer_tax(
+                                    if is_word {
+                                        TransferAddress::Word(
+                                            operand.as_logical_memory_offset_unsafe(),
+                                        )
+                                    } else {
+                                        TransferAddress::Byte(
+                                            operand.as_logical_memory_offset_unsafe(),
+                                        )
+                                    },
+                                    arch,
+                                );
+
+                                if res.len() > 0 {
+                                    res.push(' ')
+                                }
+
+                                res.push_str(format!("{}t", transfer_tax).as_str());
+                            }
+
+                            res
+                        });
+
                         writeln!(
                             out,
                             "{} ; {} {:#06x} -> {:#06x}",
                             instr.format(),
                             mutation.reg.format(),
                             mutation.before,
-                            mutation.after
+                            mutation.after,
                         )
                         .expect("is ok");
                     });
@@ -1024,8 +1070,8 @@ pub fn execute<T: Write>(
     mut out: Option<&mut T>,
     config: SimulatorConfig,
 ) -> Simulator {
-    let mut machine = Simulator::from(instructions, config);
-    machine.run(&mut out);
+    let mut machine = Simulator::from(instructions);
+    machine.run(&mut out, config);
 
     machine
 }

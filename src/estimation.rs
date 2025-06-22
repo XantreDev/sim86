@@ -103,7 +103,7 @@ fn estimate_eac(operand: &Operand) -> u8 {
     }
 }
 
-enum TransferAddress {
+pub enum TransferAddress {
     Word(u16),
     Byte(u16),
 }
@@ -127,10 +127,10 @@ impl CycleEstimation {
     }
 }
 
-struct CycleEstimation {
-    base: u8,
-    transfers: u8,
-    eac: u8,
+pub struct CycleEstimation {
+    pub(crate) base: u8,
+    pub(crate) transfers: u8,
+    pub(crate) eac: u8,
 }
 
 impl CycleEstimation {
