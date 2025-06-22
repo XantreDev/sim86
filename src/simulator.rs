@@ -113,6 +113,18 @@ enum ArithmeticOp {
     Sub,
     Cmp,
 }
+
+impl OpCode {
+    fn as_arithmetic_op(&self) -> Option<ArithmeticOp> {
+        match self {
+            OpCode::Add => Some(ArithmeticOp::Add),
+            OpCode::Sub => Some(ArithmeticOp::Sub),
+            OpCode::Cmp => Some(ArithmeticOp::Cmp),
+            _ => None,
+        }
+    }
+}
+
 impl From<&ArithmeticOp> for ArithmeticAction {
     fn from(from: &ArithmeticOp) -> ArithmeticAction {
         match from {
@@ -370,6 +382,128 @@ fn print_flags(prev_flags: &Flags, next_flags: &Flags) -> String {
     format!("flags: {} -> {}", prev_flags.format(), next_flags.format())
 }
 
+#[derive(Debug)]
+struct ExecutionRegMutation {
+    reg: Register,
+    before: u16,
+    after: u16,
+}
+impl ExecutionRegMutation {
+    fn as_mutation(self) -> ExecutionMutation {
+        ExecutionMutation::Register(self)
+    }
+}
+#[derive(Debug)]
+struct ExecutionStoreMutation {
+    value: u16,
+    target: Address,
+}
+
+#[derive(Debug)]
+struct ExecutionArithmeticMutation {
+    base: Option<ExecutionRegMutation>,
+    prev_flags: Flags,
+    next_flags: Flags,
+}
+impl ExecutionArithmeticMutation {
+    fn as_mutation(self) -> ExecutionMutation {
+        ExecutionMutation::Arithmetic(self)
+    }
+}
+
+impl ExecutionStoreMutation {
+    fn as_mutation(self) -> ExecutionMutation {
+        ExecutionMutation::Store(self)
+    }
+}
+
+#[derive(Debug)]
+enum ExecutionMutation {
+    Register(ExecutionRegMutation),
+    Store(ExecutionStoreMutation),
+    Arithmetic(ExecutionArithmeticMutation),
+}
+
+impl ExecutionMutation {
+    fn as_register_unsafe(&self) -> &ExecutionRegMutation {
+        match self {
+            ExecutionMutation::Register(reg) => reg,
+            _ => panic!("unexpected {:?}", self),
+        }
+    }
+    fn as_store_unsafe(&self) -> &ExecutionStoreMutation {
+        match self {
+            ExecutionMutation::Store(store) => store,
+            _ => panic!("unexpected {:?}", self),
+        }
+    }
+    fn as_arithmetic_unsafe(&self) -> &ExecutionArithmeticMutation {
+        match self {
+            ExecutionMutation::Arithmetic(arithm) => arithm,
+            _ => panic!("unexpected {:?}", self),
+        }
+    }
+}
+
+struct ExecutionMeta {
+    resolved_memory_operand: Option<Address>,
+    mutation: Option<ExecutionMutation>,
+    jump: Option<i8>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Address {
+    value: usize,
+}
+impl Address {
+    fn of_memory(value: u16) -> Address {
+        Address {
+            value: (value as usize) + (START_OF_MEMORY as usize),
+        }
+    }
+
+    fn is_memory(&self) -> bool {
+        self.value >= START_OF_MEMORY
+    }
+
+    fn as_memory_offset(&self) -> usize {
+        self.value
+    }
+
+    fn as_logical_memory_offset_unsafe(&self) -> u16 {
+        assert!(self.is_memory(), "is only defined for memory addresses");
+
+        (self.value - START_OF_MEMORY) as u16
+    }
+
+    fn of_register(reg: &Register) -> Address {
+        let index = match reg {
+            Register::Ax => 0,
+            Register::Ah => 1,
+            Register::Al => 0,
+
+            Register::Bx => 2,
+            Register::Bh => 3,
+            Register::Bl => 2,
+
+            Register::Cx => 4,
+            Register::Ch => 5,
+            Register::Cl => 4,
+
+            Register::Dx => 6,
+            Register::Dh => 7,
+            Register::Dl => 6,
+
+            Register::Sp => 8,
+            Register::Bp => 10,
+            Register::Si => 12,
+            Register::Di => 14,
+        };
+
+        Address { value: index }
+    }
+}
+
 impl Simulator {
     pub fn from(instructions: Vec<u8>, config: SimulatorConfig) -> Simulator {
         Simulator {
@@ -381,17 +515,10 @@ impl Simulator {
         }
     }
 
-    fn process_jump<T: Write>(
-        &self,
-        instruction: &Instruction,
-        out_opt: &mut Option<&mut T>,
-    ) -> Option<i8> {
+    fn process_jump(&self, instruction: &Instruction) -> ExecutionMeta {
         let displacement = instruction.left_operand.as_displacement();
-        out_opt.if_some_ref_mut(|out| {
-            write!(out, "{} ; ", instruction.format()).expect("should write");
-        });
         assert!(displacement.is_some());
-        match instruction.op_code {
+        let jump = match instruction.op_code {
             OpCode::Je if (self.flags.contains(Flags::Zero)) => displacement,
 
             OpCode::Jl
@@ -438,56 +565,60 @@ impl Simulator {
             OpCode::Jcxz if (self.get_reg(&Register::Cx) == 0) => displacement,
 
             _ => None,
+        };
+
+        ExecutionMeta {
+            resolved_memory_operand: None,
+            mutation: None,
+            jump: jump,
         }
     }
-    fn process_loop<T: Write>(
-        &mut self,
-        instruction: &Instruction,
-        out_opt: &mut Option<&mut T>,
-    ) -> Option<i8> {
+
+    fn process_loop(&mut self, instruction: &Instruction) -> ExecutionMeta {
         let displacement = instruction.left_operand.as_displacement();
         assert!(displacement.is_some());
 
         let prev_cx = self.get_reg(&Register::Cx);
         let (next_cx, flags) = execute_arithmetic_op(prev_cx, 1, &ArithmeticOp::Sub, true);
 
-        out_opt.if_some_ref_mut(|out| {
-            write!(
-                out,
-                "{} ; cx {:#06x} -> {:#06x} ",
-                instruction.format(),
-                prev_cx,
-                next_cx,
-            )
-            .expect("write is fine");
-        });
-
-        self.memory.write_as_u16(Register::Cx.to_index(), next_cx);
+        self.memory
+            .write_as_u16(Address::of_register(&Register::Cx), next_cx);
         // it doesn't affect the flags
         // self.flags = flags;
 
-        return match instruction.op_code {
+        let jump = match instruction.op_code {
             OpCode::Loop if (next_cx != 0) => displacement,
             OpCode::Loopz if (next_cx != 0 && flags.contains(Flags::Zero)) => displacement,
             OpCode::Loopnz if (next_cx != 0 && flags.not().contains(Flags::Zero)) => displacement,
             _ => None,
         };
+        ExecutionMeta {
+            resolved_memory_operand: None,
+            mutation: Some(
+                ExecutionRegMutation {
+                    reg: Register::Cx,
+                    before: prev_cx,
+                    after: next_cx,
+                }
+                .as_mutation(),
+            ),
+            jump: jump,
+        }
     }
 
-    fn address_of_operand(&self, operand: &Operand) -> Option<usize> {
+    fn address_of_operand(&self, operand: &Operand) -> Option<Address> {
         match operand {
             Operand::EAC(reg1, reg2, displ) => {
                 let a = reg1.map(|it| self.get_reg(&it)).unwrap_or(0);
                 let b = reg2.map(|it| self.get_reg(&it)).unwrap_or(0);
                 let c = displ.unwrap_or(0);
 
-                let address = (a as i32) + (b as i32) + (c as i32);
+                // there are a lot of edge cases
+                let address = ((a as i32) + (b as i32) + (c as i32)) as u16;
 
-                return Some((address as usize) + (START_OF_MEMORY as usize));
+                Some(Address::of_memory(address))
             }
-            Operand::Reference(reference) => {
-                Some((*reference as usize) + (START_OF_MEMORY as usize))
-            }
+            Operand::Reference(reference) => Some(Address::of_memory(*reference)),
             _ => None,
         }
     }
@@ -505,13 +636,69 @@ impl Simulator {
             let movs = iter.movs;
             match (&instr.op_code, instr.left_operand) {
                 (OpCode::Mov, Operand::Register(_)) => {
-                    self.mov_register(&instr, out_opt);
+                    let meta = self.mov_register(&instr);
+                    let _mutation = meta.mutation.expect("mov mutates");
+                    let mutation = _mutation.as_register_unsafe();
+
+                    out_opt.if_some_ref_mut(|out| {
+                        writeln!(
+                            out,
+                            "{} ; {} {:#06x} -> {:#06x}",
+                            instr.format(),
+                            mutation.reg.format(),
+                            mutation.before,
+                            mutation.after
+                        )
+                        .expect("is ok");
+                    });
                 }
                 (OpCode::Mov, Operand::EAC(_, _, _) | Operand::Reference(_)) => {
-                    self.process_store(&instr, out_opt);
+                    let meta = self.process_store(&instr);
+                    let _mutation = meta.mutation.expect("store mutates");
+                    let mutation = _mutation.as_store_unsafe();
+
+                    out_opt.if_some_ref_mut(|out| {
+                        writeln!(
+                            out,
+                            "{} ; {:#06x} -> ({:#06x})",
+                            instr.format(),
+                            mutation.value,
+                            mutation.target.as_logical_memory_offset_unsafe()
+                        )
+                        .expect("store should write");
+                    });
                 }
                 (OpCode::Cmp | OpCode::Add | OpCode::Sub, Operand::Register(_)) => {
-                    self.arithmetic_register(&instr, out_opt);
+                    let meta = self.arithmetic_register(&instr);
+
+                    let _mutation = meta.mutation.expect("arithm mutates");
+                    let mutation = _mutation.as_arithmetic_unsafe();
+
+                    out_opt.if_some_ref_mut(|out| {
+                        write!(out, "{} ; ", instr.format()).expect("is ok");
+
+                        let base_opt = &mutation.base;
+                        match base_opt {
+                            Some(base) => {
+                                write!(
+                                    out,
+                                    "{} {:#06x} -> {:#06x} ",
+                                    base.reg.format(),
+                                    base.before,
+                                    base.after
+                                )
+                                .expect("should write");
+                            }
+                            _ => {}
+                        }
+
+                        writeln!(
+                            out,
+                            "{}",
+                            print_flags(&mutation.prev_flags, &mutation.next_flags)
+                        )
+                        .expect("write is fine");
+                    });
                 }
                 (
                     OpCode::Je
@@ -533,8 +720,11 @@ impl Simulator {
                     | OpCode::Jcxz,
                     _,
                 ) => {
-                    let displacement = self.process_jump(&instr, out_opt);
-                    match displacement {
+                    out_opt.if_some_ref_mut(|out| {
+                        write!(out, "{} ; ", instr.format()).expect("should write");
+                    });
+                    let displacement = self.process_jump(&instr);
+                    match displacement.jump {
                         Some(it) => {
                             let next_ip = if it >= 0 {
                                 self.ip + (it as u16)
@@ -552,8 +742,23 @@ impl Simulator {
                     });
                 }
                 (OpCode::Loop | OpCode::Loopz | OpCode::Loopnz, _) => {
-                    let displacement = self.process_loop(&instr, out_opt);
-                    match displacement {
+                    let meta = self.process_loop(&instr);
+                    let _mutation = meta.mutation.expect("loop mutates");
+                    let mutation = _mutation.as_register_unsafe();
+
+                    out_opt.if_some_ref_mut(|out| {
+                        write!(
+                            out,
+                            "{} ; {} {:#06x} -> {:#06x} ",
+                            instr.format(),
+                            mutation.reg.format(),
+                            mutation.before,
+                            mutation.after,
+                        )
+                        .expect("write is fine");
+                    });
+
+                    match meta.jump {
                         Some(it) => {
                             let next_ip = if it >= 0 {
                                 self.ip + (it as u16)
@@ -585,28 +790,22 @@ impl Simulator {
     }
 
     fn get_reg(&self, reg: &Register) -> u16 {
+        let address = Address::of_register(reg);
         if reg.is_wide() {
-            self.memory.read_as_u16(reg.to_index())
+            self.memory.read_as_u16(address)
         } else {
-            self.memory[reg.to_index()] as u16
+            self.memory.read_as_u8(address) as u16
         }
     }
 
-    fn arithmetic_register<T: Write>(
-        &mut self,
-        instruction: &Instruction,
-        out_opt: &mut Option<&mut T>,
-    ) {
-        let arithm_op = match instruction.op_code {
-            OpCode::Add => ArithmeticOp::Add,
-            OpCode::Sub => ArithmeticOp::Sub,
-            OpCode::Cmp => ArithmeticOp::Cmp,
-            _ => panic!("wrong opcode {:?}", instruction.op_code),
+    fn arithmetic_register(&mut self, instruction: &Instruction) -> ExecutionMeta {
+        let Some(arithm_op) = instruction.op_code.as_arithmetic_op() else {
+            panic!("wrong opcode {:?}", instruction.op_code)
         };
         let left_reg = instruction
             .left_operand
             .as_register()
-            .expect("it's arithmetic op for rigister operands");
+            .expect("it's arithmetic op for register operands");
 
         assert_eq!(
             instruction.flags.contains(InstructionFlags::Wide),
@@ -616,96 +815,94 @@ impl Simulator {
 
         let is_wide = left_reg.is_wide();
 
-        out_opt.if_some_ref_mut(|out| {
-            let word_reg = left_reg.to_word();
-            let prev_value = self.get_reg(&word_reg);
-
-            out.write(format!("{} ; ", instruction.format(),).as_bytes())
-                .expect("is ok");
-
-            if arithm_op != ArithmeticOp::Cmp {
-                out.write(format!("{} {:#06x} -> ", word_reg.format(), prev_value).as_bytes())
-                    .expect("should write");
-            }
-        });
+        let left_word_reg = left_reg.to_word();
+        let prev_value = self.get_reg(&left_reg.to_word());
 
         let left_value = self.get_reg(&left_reg);
-        let right_value = match right {
-            Operand::Immediate(value) => value as u16,
-            Operand::Register(right_reg) => self.get_reg(&right_reg),
+        let (resolved_right_memory_address, right_value) = match right {
+            Operand::Immediate(value) => (None, value as u16),
+            Operand::Register(right_reg) => (None, self.get_reg(&right_reg)),
             Operand::EAC(_, _, _) => {
                 let address = self.address_of_operand(&right).expect("should be address");
 
-                if left_reg.is_wide() {
+                let value = if left_reg.is_wide() {
                     self.memory.read_as_u16(address)
                 } else {
-                    self.memory[address] as u16
-                }
+                    self.memory.read_as_u8(address) as u16
+                };
+                (Some(address), value)
             }
             _ => panic!("invariant arithm r_val {:#?}", right),
         };
 
-        let (next_value, flags) =
+        let prev_flags = self.flags;
+        let (next_value, next_flags) =
             execute_arithmetic_op(left_value, right_value, &arithm_op, is_wide);
 
-        out_opt.if_some_ref_mut(|out| {
-            if arithm_op != ArithmeticOp::Cmp {
-                out.write(format!("{:#06x} ", next_value).as_bytes())
-                    .expect("write is ok");
-            }
-
-            writeln!(out, "{}", print_flags(&self.flags, &flags)).expect("write is fine");
-        });
-
-        self.flags = flags;
+        self.flags = next_flags;
         if left_reg.is_wide() {
-            self.memory.write_as_u16(left_reg.to_index(), next_value);
+            self.memory
+                .write_as_u16(Address::of_register(&left_reg), next_value);
         } else {
-            self.memory[left_reg.to_index()] = next_value as u8;
+            self.memory
+                .write_as_u8(Address::of_register(&left_reg), next_value as u8);
+        }
+
+        ExecutionMeta {
+            resolved_memory_operand: resolved_right_memory_address,
+            jump: None,
+            mutation: ExecutionArithmeticMutation {
+                prev_flags: prev_flags,
+                next_flags: next_flags,
+                base: match arithm_op {
+                    ArithmeticOp::Cmp => None,
+                    ArithmeticOp::Sub | ArithmeticOp::Add => ExecutionRegMutation {
+                        reg: left_word_reg,
+                        before: prev_value,
+                        after: next_value,
+                    }
+                    .into(),
+                },
+            }
+            .as_mutation()
+            .into(),
         }
     }
 
-    fn mov_register<T: Write>(&mut self, instruction: &Instruction, out_opt: &mut Option<&mut T>) {
+    fn mov_register(&mut self, instruction: &Instruction) -> ExecutionMeta {
         let Operand::Register(to_reg) = &instruction.left_operand else {
             panic!("unexpected instruction {}", instruction.format());
         };
+        let to_reg_address = Address::of_register(to_reg);
         let operand = instruction.right_operand;
         let flags = instruction.flags;
 
         let is_wide = to_reg.is_wide();
         assert_eq!(flags.contains(InstructionFlags::Wide), is_wide);
-        out_opt.if_some_ref_mut(|out| {
-            let word_reg = to_reg.to_word();
-            let prev_value = self.get_reg(&word_reg);
 
-            out.write(
-                format!(
-                    "{} ; {} {:#06x} -> ",
-                    instruction.format(),
-                    word_reg.format(),
-                    prev_value
-                )
-                .as_bytes(),
-            )
-            .expect("is ok");
-        });
+        let word_reg = to_reg.to_word();
+        let prev_value = self.get_reg(&word_reg);
 
-        if is_wide {
+        let resolved_memory_operand = if is_wide {
             match &operand {
                 Operand::Register(from_reg) => {
-                    let value = self.memory.read_as_u16(from_reg.to_index());
-                    self.memory.write_as_u16(to_reg.to_index(), value);
+                    let value = self.memory.read_as_u16(Address::of_register(from_reg));
+                    self.memory.write_as_u16(to_reg_address, value);
+                    None
                 }
                 Operand::Immediate(data) => {
-                    self.memory.write_as_u16(to_reg.to_index(), *data as u16);
+                    self.memory.write_as_u16(to_reg_address, *data as u16);
+                    None
                 }
                 Operand::EAC(_, _, _) => {
                     let Some(address) = self.address_of_operand(&operand) else {
                         panic!("invariant");
                     };
 
-                    let value = self.memory.read_as_u16(address as usize);
-                    self.memory.write_as_u16(to_reg.to_index(), value);
+                    let value = self.memory.read_as_u16(address);
+                    self.memory.write_as_u16(to_reg_address, value);
+
+                    Some(address)
                 }
                 _ => panic!("unexpected operand {}", operand.format()),
             }
@@ -715,83 +912,83 @@ impl Simulator {
                     #[cfg(debug_assertions)]
                     assert!(!from_reg.is_wide());
 
-                    self.memory[to_reg.to_index()] = self.memory[from_reg.to_index()];
+                    let value = self.memory.read_as_u8(Address::of_register(from_reg));
+                    self.memory.write_as_u8(to_reg_address, value);
+
+                    None
                 }
                 Operand::Immediate(data) => {
                     #[cfg(debug_assertions)]
                     assert!(*data <= 0x00FFi16);
 
-                    self.memory[to_reg.to_index()] = (*data) as u8;
+                    self.memory.write_as_u8(to_reg_address, (*data) as u8);
+                    None
                 }
                 Operand::EAC(_, _, _) => {
                     let Some(address) = self.address_of_operand(&operand) else {
                         panic!("invariant");
                     };
 
-                    let value = self.memory[address as usize];
-                    self.memory[to_reg.to_index()] = value;
+                    let value = self.memory.read_as_u8(address);
+                    self.memory.write_as_u8(Address::of_register(to_reg), value);
+
+                    Some(address)
                 }
                 _ => panic!("unexpected operand {}", operand.format()),
             }
+        };
+
+        ExecutionMeta {
+            resolved_memory_operand: resolved_memory_operand,
+            mutation: Some(
+                ExecutionRegMutation {
+                    reg: word_reg,
+                    before: prev_value,
+                    after: self.get_reg(&word_reg),
+                }
+                .as_mutation(),
+            ),
+            jump: None,
         }
-
-        out_opt.if_some_ref_mut(|out| {
-            let word_reg = to_reg.to_word();
-            let next_value = self.get_reg(&word_reg);
-
-            out.write(format!("{:#06x}\n", next_value).as_bytes())
-                .expect("is ok");
-        });
     }
 
-    fn process_store<T: Write>(&mut self, instruction: &Instruction, out_opt: &mut Option<&mut T>) {
-        // let Operand::Register(reg) = instruction.right_operand else {
-        //     panic!("invariant op ${:?}", instruction.right_operand);
-        // };
+    fn process_store(&mut self, instruction: &Instruction) -> ExecutionMeta {
         let address = self
             .address_of_operand(&instruction.left_operand)
             .expect("address must exist");
 
-        match instruction.right_operand {
+        let mutation_value = match instruction.right_operand {
             Operand::Register(reg) => {
                 let value = self.get_reg(&reg);
-                out_opt.if_some_ref_mut(|out| {
-                    writeln!(
-                        out,
-                        "{} ; {:#06x} -> ({:#06x})",
-                        instruction.format(),
-                        value,
-                        address
-                    )
-                    .expect("store should write");
-                });
                 if reg.is_wide() {
-                    let value = self.memory.read_as_u16(reg.to_index());
-
                     self.memory.write_as_u16(address, value);
                 } else {
-                    self.memory[address] = self.memory[reg.to_index()];
+                    self.memory.write_as_u8(address, value as u8);
                 }
+                value
             }
             Operand::Immediate(value) => {
-                out_opt.if_some_ref_mut(|out| {
-                    writeln!(
-                        out,
-                        "{} ; {:#06x} -> ({:#06x})",
-                        instruction.format(),
-                        value,
-                        address
-                    )
-                    .expect("store should write");
-                });
-
                 if instruction.flags.contains(InstructionFlags::Wide) {
                     self.memory.write_as_u16(address, value as u16);
                 } else {
-                    self.memory[address] = value as u8;
+                    self.memory.write_as_u8(address, value as u8);
                 }
+
+                value as u16
             }
             _ => panic!("invariant {:#?}", instruction),
+        };
+
+        ExecutionMeta {
+            resolved_memory_operand: Some(address),
+            jump: None,
+            mutation: Some(
+                ExecutionStoreMutation {
+                    value: mutation_value,
+                    target: address,
+                }
+                .as_mutation(),
+            ),
         }
     }
 
@@ -851,32 +1048,6 @@ impl Register {
             _ => self.to_owned(),
         }
     }
-
-    // little endian encoding
-    fn to_index(&self) -> usize {
-        match self {
-            Register::Ax => 0,
-            Register::Ah => 1,
-            Register::Al => 0,
-
-            Register::Bx => 2,
-            Register::Bh => 3,
-            Register::Bl => 2,
-
-            Register::Cx => 4,
-            Register::Ch => 5,
-            Register::Cl => 4,
-
-            Register::Dx => 6,
-            Register::Dh => 7,
-            Register::Dl => 6,
-
-            Register::Sp => 8,
-            Register::Bp => 10,
-            Register::Si => 12,
-            Register::Di => 14,
-        }
-    }
 }
 
 trait SomeTakable<T> {
@@ -898,14 +1069,16 @@ impl<T> SomeTakable<T> for Option<T> {
     }
 }
 
-trait AsU16 {
+trait SimulatorMemory {
     fn as_u16_ref(&self) -> &[u16];
     fn as_u16_ref_mut(&mut self) -> &mut [u16];
-    fn read_as_u16(&self, index: usize) -> u16;
-    fn write_as_u16(&mut self, index: usize, value: u16);
+    fn read_as_u8(&self, index: Address) -> u8;
+    fn read_as_u16(&self, index: Address) -> u16;
+    fn write_as_u8(&mut self, index: Address, value: u8);
+    fn write_as_u16(&mut self, index: Address, value: u16);
 }
 
-impl AsU16 for [u8] {
+impl SimulatorMemory for [u8] {
     fn as_u16_ref(&self) -> &[u16] {
         let size = size_of_val(self);
 
@@ -917,7 +1090,8 @@ impl AsU16 for [u8] {
 
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr().cast::<u16>(), size) }
     }
-    fn read_as_u16(&self, index: usize) -> u16 {
+    fn read_as_u16(&self, index: Address) -> u16 {
+        let index = index.as_memory_offset();
         assert!(self.len() > index + 1);
 
         if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
@@ -929,7 +1103,18 @@ impl AsU16 for [u8] {
             (lower) | (upper << 8)
         }
     }
-    fn write_as_u16(&mut self, index: usize, value: u16) {
+    fn read_as_u8(&self, index: Address) -> u8 {
+        let index = index.as_memory_offset();
+
+        self[index]
+    }
+    fn write_as_u8(&mut self, index: Address, value: u8) {
+        let index = index.as_memory_offset();
+
+        self[index] = value;
+    }
+    fn write_as_u16(&mut self, index: Address, value: u16) {
+        let index = index.as_memory_offset();
         assert!(self.len() > index + 1);
 
         if cfg!(not(prefer_native_ops = "false")) && cfg!(target_endian = "little") {
