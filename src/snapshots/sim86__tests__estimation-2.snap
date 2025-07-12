@@ -1,0 +1,68 @@
+---
+source: src/main.rs
+expression: "str::from_utf8(res.as_slice()).unwrap()"
+---
+X8086
+
+mov bx, 1000 ; clocks: +4 = 4 bx 0x0000 -> 0x03e8
+mov bp, 2000 ; clocks: +4 = 8 bp 0x0000 -> 0x07d0
+mov si, 3000 ; clocks: +4 = 12 si 0x0000 -> 0x0bb8
+mov di, 4000 ; clocks: +4 = 16 di 0x0000 -> 0x0fa0
+mov cx, [bp+di] ; clocks: +15 = 31 (8 + 7ea) cx 0x0000 -> 0x0000
+mov [bx+si], cx ; clocks: +16 = 47 (9 + 7ea) 0x0000 -> 0x0fa0
+mov cx, [bp+si] ; clocks: +16 = 63 (8 + 8ea) cx 0x0000 -> 0x0000
+mov [bx+di], cx ; clocks: +17 = 80 (9 + 8ea) 0x0000 -> 0x1388
+mov cx, [bp+di+1000] ; clocks: +19 = 99 (8 + 11ea) cx 0x0000 -> 0x0000
+mov [bx+si+1000], cx ; clocks: +20 = 119 (9 + 11ea) 0x0000 -> 0x1388
+mov cx, [bp+si+1000] ; clocks: +20 = 139 (8 + 12ea) cx 0x0000 -> 0x0000
+mov [bx+di+1000], cx ; clocks: +21 = 160 (9 + 12ea) 0x0000 -> 0x1770
+add dx, [bp+si+1000] ; clocks: +21 = 181 (9 + 12ea) dx 0x0000 -> 0x0000 | flags: None -> PZ
+add [bp+si], word 76 ; clocks: +25 = 206 (17 + 8ea) 0x0000 -> (0x1388) | flags: PZ -> None
+add dx, [bp+si+1001] ; clocks: +25 = 231 (9 + 12ea + 4t) dx 0x0000 -> 0x0000 | flags: None -> PZ
+add [di+999], dx ; clocks: +33 = 264 (16 + 9ea + 8t) 0x4c00 -> (0x1387) | flags: PZ -> P
+add [bp+si], word 75 ; clocks: +25 = 289 (17 + 8ea) 0x004c -> (0x1388) | flags: P -> A
+
+Final registers: 
+ax 0x0000 (0)
+bx 0x03e8 (1000)
+cx 0x0000 (0)
+dx 0x0000 (0)
+sp 0x0000 (0)
+bp 0x07d0 (2000)
+si 0x0bb8 (3000)
+di 0x0fa0 (4000)
+ip: 0x0036 (54)
+flags: A
+
+
+X8088
+
+mov bx, 1000 ; clocks: +4 = 4 bx 0x0000 -> 0x03e8
+mov bp, 2000 ; clocks: +4 = 8 bp 0x0000 -> 0x07d0
+mov si, 3000 ; clocks: +4 = 12 si 0x0000 -> 0x0bb8
+mov di, 4000 ; clocks: +4 = 16 di 0x0000 -> 0x0fa0
+mov cx, [bp+di] ; clocks: +19 = 35 (8 + 7ea + 4t) cx 0x0000 -> 0x0000
+mov [bx+si], cx ; clocks: +20 = 55 (9 + 7ea + 4t) 0x0000 -> 0x0fa0
+mov cx, [bp+si] ; clocks: +20 = 75 (8 + 8ea + 4t) cx 0x0000 -> 0x0000
+mov [bx+di], cx ; clocks: +21 = 96 (9 + 8ea + 4t) 0x0000 -> 0x1388
+mov cx, [bp+di+1000] ; clocks: +23 = 119 (8 + 11ea + 4t) cx 0x0000 -> 0x0000
+mov [bx+si+1000], cx ; clocks: +24 = 143 (9 + 11ea + 4t) 0x0000 -> 0x1388
+mov cx, [bp+si+1000] ; clocks: +24 = 167 (8 + 12ea + 4t) cx 0x0000 -> 0x0000
+mov [bx+di+1000], cx ; clocks: +25 = 192 (9 + 12ea + 4t) 0x0000 -> 0x1770
+add dx, [bp+si+1000] ; clocks: +25 = 217 (9 + 12ea + 4t) dx 0x0000 -> 0x0000 | flags: None -> PZ
+add [bp+si], word 76 ; clocks: +33 = 250 (17 + 8ea + 8t) 0x0000 -> (0x1388) | flags: PZ -> None
+add dx, [bp+si+1001] ; clocks: +25 = 275 (9 + 12ea + 4t) dx 0x0000 -> 0x0000 | flags: None -> PZ
+add [di+999], dx ; clocks: +33 = 308 (16 + 9ea + 8t) 0x4c00 -> (0x1387) | flags: PZ -> P
+add [bp+si], word 75 ; clocks: +33 = 341 (17 + 8ea + 8t) 0x004c -> (0x1388) | flags: P -> A
+
+Final registers: 
+ax 0x0000 (0)
+bx 0x03e8 (1000)
+cx 0x0000 (0)
+dx 0x0000 (0)
+sp 0x0000 (0)
+bp 0x07d0 (2000)
+si 0x0bb8 (3000)
+di 0x0fa0 (4000)
+ip: 0x0036 (54)
+flags: A

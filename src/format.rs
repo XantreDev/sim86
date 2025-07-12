@@ -77,14 +77,15 @@ impl Formattable for Operand {
         match self {
             Self::Register(reg) => reg.format(),
 
-            Self::Address(Some(a), Option::None, Option::None) => format!("[{}]", a.format()),
-            Self::Address(Option::None, Option::None, Some(displacement)) => {
+            Self::Reference(reference) => format!("[{}]", reference),
+            Self::EAC(Some(a), Option::None, Option::None) => format!("[{}]", a.format()),
+            Self::EAC(Option::None, Option::None, Some(displacement)) => {
                 format!("[{}]", displacement)
             }
-            Self::Address(Some(a), Option::None, immediate) => {
+            Self::EAC(Some(a), Option::None, immediate) => {
                 format!("[{}{}]", a.format(), pad_displacement(immediate))
             }
-            Self::Address(Some(a), Some(b), immediate) => {
+            Self::EAC(Some(a), Some(b), immediate) => {
                 format!(
                     "[{}+{}{}]",
                     a.format(),
@@ -92,7 +93,7 @@ impl Formattable for Operand {
                     pad_displacement(immediate)
                 )
             }
-            Self::Address(_, _, _) => panic!("unsupported {:?}", self),
+            Self::EAC(_, _, _) => panic!("unsupported {:?}", self),
 
             Self::Empty => "".to_string(),
             Self::JumpDisplacement(displacement) => {
@@ -105,15 +106,6 @@ impl Formattable for Operand {
                 }
             }
             Self::Immediate(immediate) => immediate.to_string(),
-        }
-    }
-}
-
-impl Operand {
-    fn is_eac(&self) -> bool {
-        match self {
-            Operand::Address(_, _, _) => true,
-            _ => false,
         }
     }
 }
@@ -131,7 +123,7 @@ impl Formattable for Instruction {
             self.op_code.format(),
             self.left_operand.format(),
             match (self.left_operand, self.right_operand) {
-                (Operand::Address(_, _, _), Operand::Immediate(_)) => format!(
+                (Operand::EAC(_, _, _), Operand::Immediate(_)) => format!(
                     "{} {}",
                     if self.flags.contains(InstructionFlags::Wide) {
                         "word"

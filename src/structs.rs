@@ -50,11 +50,33 @@ impl IsWide for Register {
 #[derive(Debug, Clone, Copy)]
 pub enum Operand {
     Register(Register),
-    Address(Option<Register>, Option<Register>, Option<i16>),
+    EAC(Option<Register>, Option<Register>, Option<i16>),
+    Reference(u16),
     JumpDisplacement(i8),
     Empty,
     // TODO: make u16
     Immediate(i16),
+}
+
+impl Operand {
+    pub fn is_reg(&self) -> bool {
+        matches!(self, Operand::Register(_))
+    }
+    pub fn is_eac(&self) -> bool {
+        matches!(self, Operand::EAC(_, _, _))
+    }
+    pub fn is_mem_ref(&self) -> bool {
+        matches!(self, Operand::Reference(_))
+    }
+    pub fn is_immediate(&self) -> bool {
+        matches!(self, Operand::Immediate(_))
+    }
+    pub fn is_acc_reg(&self) -> bool {
+        matches!(
+            self,
+            Operand::Register(Register::Ah | Register::Al | Register::Ax)
+        )
+    }
 }
 
 #[derive(Debug)]
