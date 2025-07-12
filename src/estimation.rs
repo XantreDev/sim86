@@ -105,7 +105,7 @@ fn estimate_eac(operand: &Operand) -> u8 {
 
 pub enum TransferAddress {
     Word(u16),
-    Byte(u16),
+    Byte,
 }
 
 impl CycleEstimation {
@@ -117,7 +117,8 @@ impl CycleEstimation {
     ) -> u32 {
         let x8088_odd_operand_transfer_cost = 4u32;
         let cost = match (architecture, address) {
-            (Architecture::X8088, TransferAddress::Word(address)) if address % 2 != 0 => {
+            (Architecture::X8088, TransferAddress::Word(_)) => x8088_odd_operand_transfer_cost,
+            (Architecture::X8086, TransferAddress::Word(address)) if address % 2 != 0 => {
                 x8088_odd_operand_transfer_cost
             }
             _ => 0,

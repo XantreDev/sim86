@@ -1,6 +1,6 @@
 use crate::{
     decoder,
-    estimation::{self, estimate_cycles_of, Architecture},
+    estimation::{estimate_cycles_of, Architecture, CycleEstimation},
     format::Formattable,
     Instruction, InstructionFlags, IsWide, OpCode, Operand, Register,
 };
@@ -388,32 +388,74 @@ struct ExecutionRegMutation {
     before: u16,
     after: u16,
 }
-impl ExecutionRegMutation {
-    fn as_mutation(self) -> ExecutionMutation {
+
+impl Into<ExecutionMutation> for ExecutionRegMutation {
+    fn into(self) -> ExecutionMutation {
         ExecutionMutation::Register(self)
     }
 }
+
+impl Into<Option<ExecutionMutation>> for ExecutionRegMutation {
+    fn into(self) -> Option<ExecutionMutation> {
+        ExecutionMutation::Register(self).into()
+    }
+}
+
 #[derive(Debug)]
 struct ExecutionStoreMutation {
-    value: u16,
+    after: u16,
+    before: u16,
     target: Address,
 }
 
 #[derive(Debug)]
+enum ExecutionArithmeticTarget {
+    Register(ExecutionRegMutation),
+    Store(ExecutionStoreMutation),
+}
+#[derive(Debug)]
 struct ExecutionArithmeticMutation {
-    base: Option<ExecutionRegMutation>,
+    target: Option<ExecutionArithmeticTarget>,
     prev_flags: Flags,
     next_flags: Flags,
 }
-impl ExecutionArithmeticMutation {
-    fn as_mutation(self) -> ExecutionMutation {
+
+impl Into<ExecutionMutation> for ExecutionArithmeticMutation {
+    fn into(self) -> ExecutionMutation {
         ExecutionMutation::Arithmetic(self)
     }
 }
 
-impl ExecutionStoreMutation {
-    fn as_mutation(self) -> ExecutionMutation {
+impl Into<Option<ExecutionMutation>> for ExecutionArithmeticMutation {
+    fn into(self) -> Option<ExecutionMutation> {
+        ExecutionMutation::Arithmetic(self).into()
+    }
+}
+
+impl Into<ExecutionMutation> for ExecutionStoreMutation {
+    fn into(self) -> ExecutionMutation {
         ExecutionMutation::Store(self)
+    }
+}
+
+impl Into<Option<ExecutionMutation>> for ExecutionStoreMutation {
+    fn into(self) -> Option<ExecutionMutation> {
+        ExecutionMutation::Store(self).into()
+    }
+}
+
+impl ExecutionArithmeticTarget {
+    fn as_register_unsafe(&self) -> &ExecutionRegMutation {
+        match self {
+            ExecutionArithmeticTarget::Register(reg) => reg,
+            _ => panic!("unexpected {:?}", self),
+        }
+    }
+    fn as_store_unsafe(&self) -> &ExecutionStoreMutation {
+        match self {
+            ExecutionArithmeticTarget::Store(store) => store,
+            _ => panic!("unexpected {:?}", self),
+        }
     }
 }
 
@@ -504,8 +546,79 @@ impl Address {
     }
 }
 
+struct InstructionSpecificPrintOutput {
+    permutation: Option<String>,
+    flags_mutation: Option<String>,
+}
+
+fn produce_estimation(
+    instr: &Instruction,
+    clocks_passed: u32,
+    arch: &Architecture,
+    estimation: CycleEstimation,
+    meta: &ExecutionMeta,
+) -> (u32, String) {
+    use crate::estimation::TransferAddress;
+    use std::fmt::Write;
+    let is_word = instr.flags.contains(InstructionFlags::Wide);
+
+    let transfer_tax = if estimation.transfers > 0 {
+        let operand = meta
+            .resolved_memory_operand
+            .expect("if has transfers memory operand must be resolved");
+        estimation.estimate_trasfer_tax(
+            if is_word {
+                TransferAddress::Word(operand.as_logical_memory_offset_unsafe())
+            } else {
+                TransferAddress::Byte
+            },
+            arch,
+        )
+    } else {
+        0
+    };
+
+    let total_clocks = (estimation.base + estimation.eac) as u32 + transfer_tax;
+
+    let mut res = String::with_capacity(
+        // "Clocks: +17 = 107 (8 + 9ea)"
+        /* prefix */
+        9  + /* estimation */ 2 + /* spacing */ 3  + /* clock */ 6 + /* spacing */ 2 + /* base */ 1 + /* spacing */ 3 + /* eac */ 4 + /* spacing */ 3 + /* transfers */ 3 + 3,
+    );
+    let next_clocks = clocks_passed + total_clocks;
+    write!(res, "clocks: +{} = {}", total_clocks, next_clocks).expect("write is ok");
+
+    let needs_details = estimation.eac > 0 || estimation.transfers > 0;
+    if needs_details {
+        res.push_str(" (");
+    }
+
+    if needs_details && estimation.base > 0 {
+        res.push_str(estimation.base.to_string().as_str());
+    }
+    if needs_details && estimation.eac > 0 {
+        if res.len() > 0 {
+            res.push_str(" + ");
+        }
+        write!(res, "{}ea", estimation.eac).expect("write is ok");
+    }
+    if needs_details && transfer_tax > 0 {
+        if res.len() > 0 {
+            res.push_str(" + ");
+        };
+
+        write!(res, "{}t", transfer_tax).expect("write is ok");
+    };
+
+    if needs_details {
+        res.push_str(")");
+    }
+
+    return (next_clocks, res);
+}
+
 impl Simulator {
-    pub fn from(instructions: Vec<u8>, config: SimulatorConfig) -> Simulator {
+    pub fn from(instructions: Vec<u8>) -> Simulator {
         Simulator {
             memory: core::array::from_fn(|_| 0u8),
             instructions,
@@ -599,7 +712,7 @@ impl Simulator {
                     before: prev_cx,
                     after: next_cx,
                 }
-                .as_mutation(),
+                .into(),
             ),
             jump: jump,
         }
@@ -623,6 +736,7 @@ impl Simulator {
     }
 
     fn run<T: Write>(&mut self, out_opt: &mut Option<&mut T>, config: &SimulatorConfig) {
+        let mut clocks: u32 = 0;
         loop {
             let mut iter = CountingIter {
                 data: &self.instructions,
@@ -635,116 +749,81 @@ impl Simulator {
             let movs = iter.movs;
             let cycle_estimation_mode = config.cycle_estimation_mode.as_ref();
 
-            match (&instr.op_code, instr.left_operand) {
+            let (meta, print_info) = match (&instr.op_code, instr.left_operand) {
                 (OpCode::Mov, Operand::Register(_)) => {
                     let meta = self.mov_register(&instr);
-                    let _mutation = meta.mutation.expect("mov mutates");
+
+                    let _mutation = meta.mutation.as_ref().expect("mov mutates");
                     let mutation = _mutation.as_register_unsafe();
 
-                    let estimation_opt =
-                        cycle_estimation_mode.map(|arch| (arch, estimate_cycles_of(&instr)));
-
-                    out_opt.if_some_ref_mut(|out| {
-                        let estimation_str = estimation_opt.map(|(arch, estimation)| {
-                            use crate::estimation::TransferAddress;
-                            let is_word = instr.flags.contains(InstructionFlags::Wide);
-
-                            let mut res = String::with_capacity(10);
-
-                            if estimation.base > 0 {
-                                res.push_str(estimation.base.to_string().as_str());
-                            }
-                            if estimation.eac > 0 {
-                                if res.len() > 0 {
-                                    res.push(' ')
-                                }
-                                res.push_str(format!("{}ea", estimation.eac).as_str());
-                            }
-                            if estimation.transfers > 0 {
-                                let operand = meta
-                                    .resolved_memory_operand
-                                    .expect("if has transfers memory operand must be resolved");
-                                let transfer_tax = estimation.estimate_trasfer_tax(
-                                    if is_word {
-                                        TransferAddress::Word(
-                                            operand.as_logical_memory_offset_unsafe(),
-                                        )
-                                    } else {
-                                        TransferAddress::Byte(
-                                            operand.as_logical_memory_offset_unsafe(),
-                                        )
-                                    },
-                                    arch,
-                                );
-
-                                if res.len() > 0 {
-                                    res.push(' ')
-                                }
-
-                                res.push_str(format!("{}t", transfer_tax).as_str());
-                            }
-
-                            res
-                        });
-
-                        writeln!(
-                            out,
-                            "{} ; {} {:#06x} -> {:#06x}",
-                            instr.format(),
+                    let print_out = InstructionSpecificPrintOutput {
+                        flags_mutation: None,
+                        permutation: Some(format!(
+                            "{} {:#06x} -> {:#06x}",
                             mutation.reg.format(),
                             mutation.before,
                             mutation.after,
-                        )
-                        .expect("is ok");
-                    });
+                        )),
+                    };
+
+                    (meta, print_out)
                 }
                 (OpCode::Mov, Operand::EAC(_, _, _) | Operand::Reference(_)) => {
                     let meta = self.process_store(&instr);
-                    let _mutation = meta.mutation.expect("store mutates");
+                    let _mutation = meta.mutation.as_ref().expect("store mutates");
                     let mutation = _mutation.as_store_unsafe();
-
-                    out_opt.if_some_ref_mut(|out| {
-                        writeln!(
-                            out,
-                            "{} ; {:#06x} -> ({:#06x})",
-                            instr.format(),
-                            mutation.value,
+                    let print_out = InstructionSpecificPrintOutput {
+                        flags_mutation: None,
+                        permutation: Some(format!(
+                            "{:#06x} -> {:#06x}",
+                            mutation.after,
                             mutation.target.as_logical_memory_offset_unsafe()
-                        )
-                        .expect("store should write");
-                    });
+                        )),
+                    };
+
+                    (meta, print_out)
+                }
+                (OpCode::Cmp | OpCode::Add | OpCode::Sub, Operand::EAC(_, _, _)) => {
+                    let meta = self.arithmetic_store(&instr);
+                    let _mutation = meta.mutation.as_ref().expect("store mutates");
+                    let mutation = _mutation.as_arithmetic_unsafe();
+
+                    let print_out = InstructionSpecificPrintOutput {
+                        permutation: mutation.target.as_ref().map(|it| {
+                            let base = it.as_store_unsafe();
+                            format!(
+                                "{:#06x} -> ({:#06x})",
+                                base.before,
+                                base.target.as_logical_memory_offset_unsafe()
+                            )
+                        }),
+                        flags_mutation: print_flags(&mutation.prev_flags, &mutation.next_flags)
+                            .into(),
+                    };
+                    (meta, print_out)
                 }
                 (OpCode::Cmp | OpCode::Add | OpCode::Sub, Operand::Register(_)) => {
                     let meta = self.arithmetic_register(&instr);
 
-                    let _mutation = meta.mutation.expect("arithm mutates");
+                    let _mutation = meta.mutation.as_ref().expect("arithm mutates");
                     let mutation = _mutation.as_arithmetic_unsafe();
+                    let print_out = InstructionSpecificPrintOutput {
+                        flags_mutation: Some(print_flags(
+                            &mutation.prev_flags,
+                            &mutation.next_flags,
+                        )),
+                        permutation: mutation.target.as_ref().map(|base| {
+                            let base = base.as_register_unsafe();
+                            format!(
+                                "{} {:#06x} -> {:#06x}",
+                                base.reg.format(),
+                                base.before,
+                                base.after
+                            )
+                        }),
+                    };
 
-                    out_opt.if_some_ref_mut(|out| {
-                        write!(out, "{} ; ", instr.format()).expect("is ok");
-
-                        let base_opt = &mutation.base;
-                        match base_opt {
-                            Some(base) => {
-                                write!(
-                                    out,
-                                    "{} {:#06x} -> {:#06x} ",
-                                    base.reg.format(),
-                                    base.before,
-                                    base.after
-                                )
-                                .expect("should write");
-                            }
-                            _ => {}
-                        }
-
-                        writeln!(
-                            out,
-                            "{}",
-                            print_flags(&mutation.prev_flags, &mutation.next_flags)
-                        )
-                        .expect("write is fine");
-                    });
+                    (meta, print_out)
                 }
                 (
                     OpCode::Je
@@ -766,11 +845,8 @@ impl Simulator {
                     | OpCode::Jcxz,
                     _,
                 ) => {
-                    out_opt.if_some_ref_mut(|out| {
-                        write!(out, "{} ; ", instr.format()).expect("should write");
-                    });
-                    let displacement = self.process_jump(&instr);
-                    match displacement.jump {
+                    let meta = self.process_jump(&instr);
+                    match meta.jump {
                         Some(it) => {
                             let next_ip = if it >= 0 {
                                 self.ip + (it as u16)
@@ -782,27 +858,23 @@ impl Simulator {
                         None => {}
                     }
 
-                    out_opt.if_some_ref_mut(|out| {
-                        writeln!(out, "ip {:#06x} -> {:#06x}", self.ip, self.ip + movs)
-                            .expect("should write");
-                    });
+                    (
+                        meta,
+                        InstructionSpecificPrintOutput {
+                            flags_mutation: format!(
+                                "ip {:#06x} -> {:#06x}",
+                                self.ip,
+                                self.ip + movs
+                            )
+                            .into(),
+                            permutation: None,
+                        },
+                    )
                 }
                 (OpCode::Loop | OpCode::Loopz | OpCode::Loopnz, _) => {
                     let meta = self.process_loop(&instr);
-                    let _mutation = meta.mutation.expect("loop mutates");
+                    let _mutation = meta.mutation.as_ref().expect("loop mutates");
                     let mutation = _mutation.as_register_unsafe();
-
-                    out_opt.if_some_ref_mut(|out| {
-                        write!(
-                            out,
-                            "{} ; {} {:#06x} -> {:#06x} ",
-                            instr.format(),
-                            mutation.reg.format(),
-                            mutation.before,
-                            mutation.after,
-                        )
-                        .expect("write is fine");
-                    });
 
                     match meta.jump {
                         Some(it) => {
@@ -816,13 +888,73 @@ impl Simulator {
                         None => {}
                     }
 
-                    out_opt.if_some_ref_mut(|out| {
-                        writeln!(out, "ip {:#06x} -> {:#06x}", self.ip, self.ip + movs)
-                            .expect("should write");
-                    });
+                    let print_out = InstructionSpecificPrintOutput {
+                        permutation: format!(
+                            "{} {:#06x} -> {:#06x}",
+                            mutation.reg.format(),
+                            mutation.before,
+                            mutation.after,
+                        )
+                        .into(),
+                        flags_mutation: format!("ip {:#06x} -> {:#06x}", self.ip, self.ip + movs)
+                            .into(),
+                    };
+                    (meta, print_out)
                 }
-                _ => panic!("unsupported OpCode {}", instr.op_code.format()),
-            }
+                _ => panic!("unsupported intstruction {:?}", instr),
+            };
+
+            out_opt.if_some_ref_mut(|out| {
+                write!(out, "{} ;", instr.format()).unwrap();
+
+                let estimation = cycle_estimation_mode.map(|arch| {
+                    let (next_clocks, estimation_text) =
+                        produce_estimation(&instr, clocks, arch, estimate_cycles_of(&instr), &meta);
+                    clocks = next_clocks;
+
+                    estimation_text
+                });
+
+                let mut should_divide = false;
+                match estimation {
+                    Some(estimatio_str) => {
+                        if !should_divide {
+                            write!(out, " ").unwrap();
+                        }
+                        write!(out, "{}", estimatio_str).unwrap()
+                    }
+                    _ => {}
+                }
+
+                match print_info.permutation {
+                    Some(permutation) => {
+                        if should_divide {
+                            write!(out, " | ").unwrap();
+                        } else {
+                            write!(out, " ").unwrap();
+                        }
+
+                        should_divide = true;
+                        write!(out, "{}", permutation).unwrap();
+                    }
+                    None => {}
+                };
+                match print_info.flags_mutation {
+                    Some(flags) => {
+                        if should_divide {
+                            write!(out, " | ").unwrap();
+                        } else {
+                            write!(out, " ").unwrap();
+                        }
+
+                        write!(out, "{}", flags).unwrap();
+                    }
+                    None => {}
+                };
+
+                writeln!(out, "").unwrap();
+            });
+
             self.ip += movs;
             if (self.ip as usize) > self.instructions.len() {
                 break;
@@ -841,6 +973,69 @@ impl Simulator {
             self.memory.read_as_u16(address)
         } else {
             self.memory.read_as_u8(address) as u16
+        }
+    }
+
+    fn arithmetic_store(&mut self, instruction: &Instruction) -> ExecutionMeta {
+        let Some(arithm_op) = instruction.op_code.as_arithmetic_op() else {
+            panic!("wrong opcode {:?}", instruction.op_code)
+        };
+        let right_value = match instruction.right_operand {
+            Operand::Register(reg) => self.get_reg(&reg),
+            Operand::Immediate(imm) => imm as u16,
+            _ => panic!("expected reg or immediate"),
+        };
+
+        let is_wide = instruction.flags.contains(InstructionFlags::Wide);
+        assert!(matches!(instruction.left_operand, Operand::EAC(_, _, _)));
+
+        let address = self
+            .address_of_operand(&instruction.left_operand)
+            .expect("should be address");
+
+        let (resolved_left_value_address, left_value) = match instruction.left_operand {
+            Operand::EAC(_, _, _) => {
+                let value = if is_wide {
+                    self.memory.read_as_u16(address)
+                } else {
+                    self.memory.read_as_u8(address) as u16
+                };
+                (address, value)
+            }
+            _ => panic!("unwxpected left in {:?}", instruction),
+        };
+
+        let prev_flags = self.flags;
+        let (next_value, next_flags) =
+            execute_arithmetic_op(left_value, right_value, &arithm_op, is_wide);
+
+        self.flags = next_flags;
+        if is_wide {
+            self.memory
+                .write_as_u16(resolved_left_value_address, next_value);
+        } else {
+            self.memory
+                .write_as_u8(resolved_left_value_address, next_value as u8);
+        }
+
+        ExecutionMeta {
+            resolved_memory_operand: resolved_left_value_address.into(),
+            jump: None,
+            mutation: ExecutionArithmeticMutation {
+                prev_flags: prev_flags,
+                next_flags: next_flags,
+                target: match arithm_op {
+                    ArithmeticOp::Cmp => None,
+                    ArithmeticOp::Sub | ArithmeticOp::Add => {
+                        Some(ExecutionArithmeticTarget::Store(ExecutionStoreMutation {
+                            target: address,
+                            before: left_value,
+                            after: next_value,
+                        }))
+                    }
+                },
+            }
+            .into(),
         }
     }
 
@@ -900,17 +1095,17 @@ impl Simulator {
             mutation: ExecutionArithmeticMutation {
                 prev_flags: prev_flags,
                 next_flags: next_flags,
-                base: match arithm_op {
+                target: match arithm_op {
                     ArithmeticOp::Cmp => None,
-                    ArithmeticOp::Sub | ArithmeticOp::Add => ExecutionRegMutation {
-                        reg: left_word_reg,
-                        before: prev_value,
-                        after: next_value,
+                    ArithmeticOp::Sub | ArithmeticOp::Add => {
+                        Some(ExecutionArithmeticTarget::Register(ExecutionRegMutation {
+                            reg: left_word_reg,
+                            before: prev_value,
+                            after: next_value,
+                        }))
                     }
-                    .into(),
                 },
             }
-            .as_mutation()
             .into(),
         }
     }
@@ -992,7 +1187,7 @@ impl Simulator {
                     before: prev_value,
                     after: self.get_reg(&word_reg),
                 }
-                .as_mutation(),
+                .into(),
             ),
             jump: None,
         }
@@ -1002,6 +1197,8 @@ impl Simulator {
         let address = self
             .address_of_operand(&instruction.left_operand)
             .expect("address must exist");
+
+        let prev_value = self.memory.read_as_u16(address);
 
         let mutation_value = match instruction.right_operand {
             Operand::Register(reg) => {
@@ -1028,13 +1225,12 @@ impl Simulator {
         ExecutionMeta {
             resolved_memory_operand: Some(address),
             jump: None,
-            mutation: Some(
-                ExecutionStoreMutation {
-                    value: mutation_value,
-                    target: address,
-                }
-                .as_mutation(),
-            ),
+            mutation: ExecutionStoreMutation {
+                after: mutation_value,
+                before: prev_value,
+                target: address,
+            }
+            .into(),
         }
     }
 
@@ -1071,7 +1267,7 @@ pub fn execute<T: Write>(
     config: SimulatorConfig,
 ) -> Simulator {
     let mut machine = Simulator::from(instructions);
-    machine.run(&mut out, config);
+    machine.run(&mut out, &config);
 
     machine
 }

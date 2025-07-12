@@ -1,0 +1,68 @@
+---
+source: src/main.rs
+expression: "str::from_utf8(res.as_slice()).unwrap()"
+---
+X8086
+
+mov bx, 1000 ; clocks: +4 = 4 bx 0x0000 -> 0x03e8
+mov bp, 2000 ; clocks: +4 = 8 bp 0x0000 -> 0x07d0
+mov si, 3000 ; clocks: +4 = 12 si 0x0000 -> 0x0bb8
+mov di, 4000 ; clocks: +4 = 16 di 0x0000 -> 0x0fa0
+mov cx, bx ; clocks: +2 = 18 cx 0x0000 -> 0x03e8
+mov dx, 12 ; clocks: +4 = 22 dx 0x0000 -> 0x000c
+mov dx, [1000] ; clocks: +14 = 36 (8 + 6ea) dx 0x000c -> 0x0000
+mov cx, [bx] ; clocks: +13 = 49 (8 + 5ea) cx 0x03e8 -> 0x0000
+mov cx, [bp] ; clocks: +17 = 66 (8 + 9ea) cx 0x0000 -> 0x0000
+mov [si], cx ; clocks: +14 = 80 (9 + 5ea) 0x0000 -> 0x0bb8
+mov [di], cx ; clocks: +14 = 94 (9 + 5ea) 0x0000 -> 0x0fa0
+mov cx, [bx+1000] ; clocks: +17 = 111 (8 + 9ea) cx 0x0000 -> 0x0000
+mov cx, [bp+1000] ; clocks: +17 = 128 (8 + 9ea) cx 0x0000 -> 0x0000
+mov [si+1000], cx ; clocks: +18 = 146 (9 + 9ea) 0x0000 -> 0x0fa0
+mov [di+1000], cx ; clocks: +18 = 164 (9 + 9ea) 0x0000 -> 0x1388
+add cx, dx ; clocks: +3 = 167 cx 0x0000 -> 0x0000 | flags: None -> PZ
+add [di+1000], cx ; clocks: +25 = 192 (16 + 9ea) 0x0000 -> (0x1388) | flags: PZ -> PZ
+
+Final registers: 
+ax 0x0000 (0)
+bx 0x03e8 (1000)
+cx 0x0000 (0)
+dx 0x0000 (0)
+sp 0x0000 (0)
+bp 0x07d0 (2000)
+si 0x0bb8 (3000)
+di 0x0fa0 (4000)
+ip: 0x0034 (52)
+flags: PZ
+
+
+X8088
+
+mov bx, 1000 ; clocks: +4 = 4 bx 0x0000 -> 0x03e8
+mov bp, 2000 ; clocks: +4 = 8 bp 0x0000 -> 0x07d0
+mov si, 3000 ; clocks: +4 = 12 si 0x0000 -> 0x0bb8
+mov di, 4000 ; clocks: +4 = 16 di 0x0000 -> 0x0fa0
+mov cx, bx ; clocks: +2 = 18 cx 0x0000 -> 0x03e8
+mov dx, 12 ; clocks: +4 = 22 dx 0x0000 -> 0x000c
+mov dx, [1000] ; clocks: +18 = 40 (8 + 6ea + 4t) dx 0x000c -> 0x0000
+mov cx, [bx] ; clocks: +17 = 57 (8 + 5ea + 4t) cx 0x03e8 -> 0x0000
+mov cx, [bp] ; clocks: +21 = 78 (8 + 9ea + 4t) cx 0x0000 -> 0x0000
+mov [si], cx ; clocks: +18 = 96 (9 + 5ea + 4t) 0x0000 -> 0x0bb8
+mov [di], cx ; clocks: +18 = 114 (9 + 5ea + 4t) 0x0000 -> 0x0fa0
+mov cx, [bx+1000] ; clocks: +21 = 135 (8 + 9ea + 4t) cx 0x0000 -> 0x0000
+mov cx, [bp+1000] ; clocks: +21 = 156 (8 + 9ea + 4t) cx 0x0000 -> 0x0000
+mov [si+1000], cx ; clocks: +22 = 178 (9 + 9ea + 4t) 0x0000 -> 0x0fa0
+mov [di+1000], cx ; clocks: +22 = 200 (9 + 9ea + 4t) 0x0000 -> 0x1388
+add cx, dx ; clocks: +3 = 203 cx 0x0000 -> 0x0000 | flags: None -> PZ
+add [di+1000], cx ; clocks: +33 = 236 (16 + 9ea + 8t) 0x0000 -> (0x1388) | flags: PZ -> PZ
+
+Final registers: 
+ax 0x0000 (0)
+bx 0x03e8 (1000)
+cx 0x0000 (0)
+dx 0x0000 (0)
+sp 0x0000 (0)
+bp 0x07d0 (2000)
+si 0x0bb8 (3000)
+di 0x0fa0 (4000)
+ip: 0x0034 (52)
+flags: PZ

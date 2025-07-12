@@ -183,16 +183,31 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use core::str;
-    use std::{fs::create_dir, fs::File, io::Write, path::Path, process::Command};
+    use std::{
+        fs,
+        io::Write,
+        path::Path,
+        process::{Command, ExitStatus},
+    };
 
-    use crate::{process_binary, read_file, write_instructions};
+    use crate::{estimation::Architecture, process_binary, read_file, write_instructions};
 
     fn compile_asm_if_not(path: &str, force_recompile: bool) {
-        if force_recompile || !Path::new(path).exists() {
+        let is_exist = Path::new(path).exists();
+        if is_exist && force_recompile {
+            fs::remove_file(Path::new(path)).expect("must delete");
+        };
+        if force_recompile || !is_exist {
             let asm_path = format!("{}.asm", path);
             assert!(Path::new(&asm_path).exists());
 
-            Command::new("nasm").args([asm_path]).output().unwrap();
+            let execution_result = Command::new("nasm").args([asm_path]).output().unwrap();
+            if !execution_result.status.success() {
+                let help = str::from_utf8(execution_result.stderr.as_slice())
+                    .unwrap_or("<failed to parse stdout>");
+                panic!("failed to compile asm:\n {}", help);
+            }
+            assert!(execution_result.status.success());
             assert!(Path::new(&path).exists());
         }
     }
@@ -220,10 +235,10 @@ mod tests {
             write_instructions(process_binary(file.iter().map(|it| *it)), &mut res);
 
             if !Path::new("./.test").exists() {
-                create_dir("./.test").unwrap();
+                fs::create_dir("./.test").unwrap();
             }
 
-            File::create("./.test/test.asm")
+            fs::File::create("./.test/test.asm")
                 .unwrap()
                 .write_all(res.as_slice())
                 .unwrap();
@@ -265,6 +280,43 @@ mod tests {
 
             use crate::simulator::{execute, SimulatorConfig};
             execute(file, Some(&mut res), SimulatorConfig::default());
+            insta::assert_snapshot!(str::from_utf8(res.as_slice()).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_estimation() {
+        let files = [
+            "./input/listing_0056_estimating_cycles",
+            "./input/listing_0057_challenge_cycles",
+        ];
+        let force_recompilation = std::env::var("RECOMPILE").map_or(false, |it| it == "true");
+
+        for file_path in files {
+            compile_asm_if_not(file_path, force_recompilation);
+            let file = read_file(file_path);
+            let mut res = Vec::new();
+
+            write!(res, "X8086\n\n").unwrap();
+            use crate::simulator::{execute, SimulatorConfig};
+            execute(
+                file.clone(),
+                Some(&mut res),
+                SimulatorConfig {
+                    cycle_estimation_mode: Some(Architecture::X8086),
+                },
+            );
+
+            write!(res, "\n\nX8088\n\n").unwrap();
+
+            execute(
+                file,
+                Some(&mut res),
+                SimulatorConfig {
+                    cycle_estimation_mode: Some(Architecture::X8088),
+                },
+            );
+
             insta::assert_snapshot!(str::from_utf8(res.as_slice()).unwrap());
         }
     }

@@ -1,13 +1,12 @@
 ---
 source: src/main.rs
 expression: "str::from_utf8(res.as_slice()).unwrap()"
-snapshot_kind: text
 ---
 mov cx, 200 ; cx 0x0000 -> 0x00c8
 mov bx, cx ; bx 0x0000 -> 0x00c8
-add cx, 1000 ; cx 0x00c8 -> 0x04b0 flags: None -> A
+add cx, 1000 ; cx 0x00c8 -> 0x04b0 | flags: None -> A
 mov bx, 2000 ; bx 0x00c8 -> 0x07d0
-sub cx, bx ; cx 0x04b0 -> 0xfce0 flags: A -> CS
+sub cx, bx ; cx 0x04b0 -> 0xfce0 | flags: A -> CS
 
 Final registers: 
 ax 0x0000 (0)
